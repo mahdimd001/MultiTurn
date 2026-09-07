@@ -1,0 +1,59 @@
+#!/bin/bash
+
+#SBATCH --time=2:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+#SBATCH --nodelist=nova21-gpu-8
+#SBATCH --partition=nova
+#SBATCH --job-name="qwen7b-0"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_7b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+# python3 convert_rouge_qwen.py \
+#  	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#  	--data-path ./mm-vet/mm-vet.json \
+#  	--image-path ./mm-vet/images
+
+# python3 v2-eval-rouge.py \
+# 	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/Qwen-VL \
+#     --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/playground/data/mm-vet/rouge-Qwen-VL-mm-vet.json \
+# 	--image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+# 	--eval-samples 218 \
+# 	--method "elastic" \
+#     --ratio 0.4 \
+#     --exp-name "test-llava-7b-rouge"
+
+#python3 eval_generate.py \
+#	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+ # 	--data-path ./mm-vet/mm-vet.json \
+ # 	--image-path ./mm-vet/images
+#	--method "elastic" \
+ # 	--ratio 0.2
+
+#python eval_ppl.py \
+#                --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#                --data-path ./mm-vet/org-mm-vet.json \
+#	            --image-path ./mm-vet/images \
+#	            --eval-samples 218 \
+#	            --method "elastic" \
+#	            --ratio 0.0 \
+#	            --exp-name "llava-13b-elastic_ppl_sensitivity"
+
+python eval_ppl.py --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+                    --data-path ./mm-vet/mm-vet.json \
+    	            --image-path ./mm-vet/images \
+                     --eval-samples 5 \
+                    --method "multimodal_helastic" \
+	                --ratio 0.5 \
+	                --exp-name "test1"

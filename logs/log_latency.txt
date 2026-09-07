@@ -1,0 +1,28 @@
+method=elastic, ratio=0.2, samples=1, avg_latency_sec=20.72404980659485, total_latency_sec=20.72404980659485
+method=helastic, ratio=0.2, samples=1, avg_latency_sec=32.753804206848145, total_latency_sec=32.753804206848145
+method=multimodal_elastic, ratio=0.2, samples=1, avg_latency_sec=20.787121295928955, total_latency_sec=20.787121295928955
+method=multimodal_helastic, ratio=0.2, samples=1, avg_latency_sec=20.75953769683838, total_latency_sec=20.75953769683838
+method=local, ratio=0.2, samples=1, avg_latency_sec=17.83547067642212, total_latency_sec=17.83547067642212
+method=h2o, ratio=0.2, samples=1, avg_latency_sec=18.3776593208313, total_latency_sec=18.3776593208313
+
+
+method=elastic, ratio=0.2, samples=1, avg_latency_sec=32.22656965255737, total_latency_sec=32.22656965255737
+method=helastic, ratio=0.2, samples=1, avg_latency_sec=48.49285912513733, total_latency_sec=48.49285912513733
+method=multimodal_elastic, ratio=0.2, samples=1, avg_latency_sec=32.42708611488342, total_latency_sec=32.42708611488342
+method=multimodal_helastic, ratio=0.2, samples=1, avg_latency_sec=32.422248125076294, total_latency_sec=32.422248125076294
+method=local, ratio=0.2, samples=1, avg_latency_sec=28.693904876708984, total_latency_sec=28.693904876708984
+method=h2o, ratio=0.2, samples=1, avg_latency_sec=29.180169820785522, total_latency_sec=29.180169820785522
+
+method=elastic, ratio=0.8, samples=1, avg_latency_sec=30.507235288619995, total_latency_sec=30.507235288619995
+method=helastic, ratio=0.8, samples=1, avg_latency_sec=71.62962126731873, total_latency_sec=71.62962126731873
+method=multimodal_elastic, ratio=0.8, samples=1, avg_latency_sec=29.942556142807007, total_latency_sec=29.942556142807007
+method=multimodal_helastic, ratio=0.8, samples=1, avg_latency_sec=31.257765769958496, total_latency_sec=31.257765769958496
+method=local, ratio=0.8, samples=1, avg_latency_sec=13.7124662399292, total_latency_sec=13.7124662399292
+method=h2o, ratio=0.8, samples=1, avg_latency_sec=16.25762414932251, total_latency_sec=16.25762414932251
+
+method=elastic, ratio=0.8, samples=1, avg_latency_sec=42.99749302864075, total_latency_sec=42.99749302864075
+method=helastic, ratio=0.8, samples=1, avg_latency_sec=93.76890587806702, total_latency_sec=93.76890587806702
+method=multimodal_elastic, ratio=0.8, samples=1, avg_latency_sec=43.14819002151489, total_latency_sec=43.14819002151489
+method=multimodal_helastic, ratio=0.8, samples=1, avg_latency_sec=42.82753777503967, total_latency_sec=42.82753777503967
+method=local, ratio=0.8, samples=1, avg_latency_sec=19.815940856933594, total_latency_sec=19.815940856933594
+method=h2o, ratio=0.8, samples=1, avg_latency_sec=22.252113342285156, total_latency_sec=22.252113342285156

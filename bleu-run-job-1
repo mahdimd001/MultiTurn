@@ -1,0 +1,60 @@
+#!/bin/bash
+
+#SBATCH --time=6:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+# SBATCH --nodelist=nova22-gpu-3
+#SBATCH --partition=nova
+#SBATCH --job-name="1run-llava7"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_7b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+# python3 convert_rouge_llava.py \
+#  	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#  	--data-path ./mm-vet/mm-vet.json \
+#  	--image-path ./mm-vet/images
+
+
+
+
+python eval_bleu.py \
+                --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+                --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/rouge-llava-v1.5-7b-mm-vet.json \
+	            --image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+	            --eval-samples 218 \
+	            --method "elastic" \
+	            --ratio 0.4 \
+	            --exp-name "bleu-llava-7b-rogue_04mmvet"
+
+python eval_bleu.py \
+                --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+                --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/rouge-llava-v1.5-7b-mm-vet.json \
+	            --image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+	            --eval-samples 218 \
+	            --method "h2o" \
+	            --ratio 0.4 \
+	            --exp-name "bleu-llava-7b-rogue_04mmvet"
+
+python eval_bleu.py \
+                --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+                --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/rouge-llava-v1.5-7b-mm-vet.json \
+	            --image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+	            --eval-samples 218 \
+	            --method "multimodal_helastic" \
+	            --ratio 0.4 \
+	            --exp-name "bleu-llava-7b-rogue_04mmvet"
+
+
+
+

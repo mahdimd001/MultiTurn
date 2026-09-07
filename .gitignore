@@ -1,0 +1,34 @@
+# Model weights / checkpoints
+*.bin
+*.pt
+*.pth
+*.safetensors
+models/
+*.ckpt
+
+# Datasets / images
+mm-vet/images/
+*.jpg
+*.jpeg
+*.png
+playground/data/
+
+# Logs / outputs
+logs_ppl_llava/
+*.out
+*.err
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Environment
+ecache/
+*.egg-info/
+
+# Misc
+.DS_Store
+venv_qwen/

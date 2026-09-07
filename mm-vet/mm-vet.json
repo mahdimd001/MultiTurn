@@ -1,0 +1,3692 @@
+[
+    {
+        "image": "v1_0.png",
+        "turns": [
+          {
+            "question": "What is x in the equation?",
+            "answer": "-1<AND>-5"
+          },
+          {
+            "question": "How many solutions does x have?",
+            "answer": "2"
+          },
+          {
+            "question": "Are both values of x negative?",
+            "answer": "yes"
+          }
+        ]
+    },
+    {
+      "image": "v1_1.png",
+      "turns": [
+        {
+          "question": "What is d in the last equation?",
+          "answer": "1.25<OR>=1.25<OR>5/4"
+        },
+        {
+          "question": "What is x in the equation?",
+          "answer": "0.75<OR>=0.75<OR>3/4"
+        }
+      ]
+    },
+    {
+      "image": "v1_3.png",
+      "turns": [
+        {
+          "question": "What is the answer to the bottom left equation?",
+          "answer": "12<OR>=12"
+        },
+        {
+          "question": "What is the answer to the second equation on the right?",
+          "answer": "7<OR>=7"
+        }
+      ]
+    },
+    {
+      "image": "v1_5.png",
+      "turns": [
+        {
+          "question": "What is the answer to the second last equation on the right?",
+          "answer": "2<OR>=2"
+        }
+      ]
+    },
+    {
+    "image": "v1_3.png",
+    "turns": [
+      {
+        "question": "What is the answer to the second equation on the right?",
+        "answer": "7<OR>=7"
+      },
+      {
+        "question": "What is that value as a number?",
+        "answer": "7"
+      },
+      {
+        "question": "Is the answer positive?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_3.png",
+    "turns": [
+      {
+        "question": "What is the answer to the second equation on the right?",
+        "answer": "7<OR>=7"
+      },
+      {
+        "question": "What is that value as a number?",
+        "answer": "7"
+      },
+      {
+        "question": "Is the answer positive?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_5.png",
+    "turns": [
+      {
+        "question": "What is the answer to the second last equation on the right?",
+        "answer": "2<OR>=2"
+      },
+      {
+        "question": "What is that answer as a number?",
+        "answer": "2"
+      },
+      {
+        "question": "Is that value smaller than 5?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_7.png",
+    "turns": [
+      {
+        "question": "Find the pattern of how the \"X\" operator is redefined, and answer the given equation in the image.",
+        "answer": "13<OR>=13"
+      },
+      {
+        "question": "What is the final answer as a number?",
+        "answer": "13"
+      },
+      {
+        "question": "Is the answer greater than 10?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_8.png",
+    "turns": [
+      {
+        "question": "What will the girl on the right write on the board?",
+        "answer": "14<OR>=14"
+      },
+      {
+        "question": "What number will she write?",
+        "answer": "14"
+      },
+      {
+        "question": "Is that number even?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_9.png",
+    "turns": [
+      {
+        "question": "How many gallons of supreme gasoline can I get with $50?",
+        "answer": "13.6<OR>13.7"
+      },
+      {
+        "question": "Is that amount less than 14 gallons?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it more than 13 gallons?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_9.png",
+    "turns": [
+      {
+        "question": "What is the price difference between diesel and regular gasoline?",
+        "answer": "0.11"
+      },
+      {
+        "question": "Is the price difference less than 0.2 dollars?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the difference greater than 0.05 dollars?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_11.jpg",
+    "turns": [
+      {
+        "question": "What is the total price for a bottle of Merlot and a bottle of Cabernet shown in the image?",
+        "answer": "249.98"
+      },
+      {
+        "question": "Is the total less than 250 dollars?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the total more than 200 dollars?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_11.jpg",
+    "turns": [
+      {
+        "question": "What is the cost of three bottles of Moet champagne?",
+        "answer": "344.97"
+      },
+      {
+        "question": "Is the total cost greater than 300 dollars?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the total cost less than 350 dollars?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_13.jpg",
+    "turns": [
+      {
+        "question": "I am getting one funghi pizza and one prosciutto pizza. How much should I pay in total?",
+        "answer": "14.8<OR>14,8"
+      },
+      {
+        "question": "Is the total cost less than 15?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the total cost more than 10?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_13.jpg",
+    "turns": [
+      {
+        "question": "I am getting two margherita pizza and one calzone. How much should I pay in total?",
+        "answer": "25.8<OR>25,8"
+      },
+      {
+        "question": "Is the total cost greater than 20?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the total cost less than 30?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_15.png",
+    "turns": [
+      {
+        "question": "What is the original price for pork belly before discount?",
+        "answer": "14"
+      },
+      {
+        "question": "Is the original price greater than 10?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the original price less than 20?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_16.jpg",
+    "turns": [
+      {
+        "question": "What is the gasoline price?",
+        "answer": "4.299<OR>4.3"
+      },
+      {
+        "question": "Is the price greater than 4 dollars?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the price less than 5 dollars?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_17.jpg",
+    "turns": [
+      {
+        "question": "What is the color of the hat worn by the person in the front left?",
+        "answer": "blue"
+      },
+      {
+        "question": "Is the hat color dark?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the hat color red?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_18.jpg",
+    "turns": [
+      {
+        "question": "What is located to the right of the shampoo?",
+        "answer": "conditioner"
+      },
+      {
+        "question": "Is the conditioner next to the shampoo?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it located on the left of the shampoo?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_18.jpg",
+    "turns": [
+      {
+        "question": "What is in the right most bottle?",
+        "answer": "mousse"
+      },
+      {
+        "question": "Is the right most bottle filled with shampoo?",
+        "answer": "no"
+      },
+      {
+        "question": "Is it a styling product?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_20.jpg",
+    "turns": [
+      {
+        "question": "What is the spatial relation between the frisbee and the man?",
+        "answer": "above the man<OR>top left"
+      },
+      {
+        "question": "Is the frisbee below the man?",
+        "answer": "no"
+      },
+      {
+        "question": "Is the frisbee positioned above him?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_21.jpg",
+    "turns": [
+      {
+        "question": "Which car is on the parking spot 33?",
+        "answer": "no<OR>empty"
+      },
+      {
+        "question": "Is parking spot 33 occupied?",
+        "answer": "no"
+      },
+      {
+        "question": "Is parking spot 33 empty?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_21.jpg",
+    "turns": [
+      {
+        "question": "Which spot is the red car parking on?",
+        "answer": "31"
+      },
+      {
+        "question": "Is the red car parked on a spot number greater than 30?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the red car parked on spot 33?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_23.png",
+    "turns": [
+      {
+        "question": "What is the price for tomatoes?",
+        "answer": "eight<OR>8.0"
+      },
+      {
+        "question": "Is the tomato price more than 5?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the tomato price less than 10?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_23.png",
+    "turns": [
+      {
+        "question": "What fruit is the the right of plums?",
+        "answer": "orange"
+      },
+      {
+        "question": "Is the fruit to the right of plums an apple?",
+        "answer": "no"
+      },
+      {
+        "question": "Is it an orange?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_25.png",
+    "turns": [
+      {
+        "question": "Based on the image, what is the total international awareness of Tina Fey?",
+        "answer": "35%"
+      },
+      {
+        "question": "Is Tina Fey's total international awareness greater than 30%?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 40%?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_25.png",
+    "turns": [
+      {
+        "question": "Based on the image, in which country does Tina Fey have the highest level of total awareness?",
+        "answer": "Australia"
+      },
+      {
+        "question": "Is Australia the country with the highest awareness?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the United States the highest one shown in the chart?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_27.png",
+    "turns": [
+      {
+        "question": "What earth's interior structure does number 2 indicate?",
+        "answer": "mantle"
+      },
+      {
+        "question": "Is number 2 pointing to the mantle?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is number 2 pointing to the crust?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_28.jpg",
+    "turns": [
+      {
+        "question": "What is the number displayed on the motorcycle ridden by the motorcyclist wearing a yellow suit?",
+        "answer": "16"
+      },
+      {
+        "question": "Is the number greater than 10?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the number 12?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_28.jpg",
+    "turns": [
+      {
+        "question": "What is the number displayed on the motorcycle on the right?",
+        "answer": "4"
+      },
+      {
+        "question": "Is the number less than 5?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the number 6?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_30.jpg",
+    "turns": [
+      {
+        "question": "Are which one of these two jets are larger in size?",
+        "answer": "same"
+      },
+      {
+        "question": "Are both jets equal in size?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is one jet larger than the other?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_31.png",
+    "turns": [
+      {
+        "question": "Is the person bigger than the car?",
+        "answer": "no"
+      },
+      {
+        "question": "Is the car larger than the person?",
+        "answer": "yes"
+      },
+      {
+        "question": "Are they the same size?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_32.png",
+    "turns": [
+      {
+        "question": "What should I do after kneading the dough, before dividing it into pieces?",
+        "answer": "warm place<AND>1 hour"
+      },
+      {
+        "question": "Should the dough be left in a warm place?",
+        "answer": "yes"
+      },
+      {
+        "question": "Should it rest for about one hour?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_33.png",
+    "turns": [
+      {
+        "question": "Should I add sugar when mixing egg and milk?",
+        "answer": "no"
+      },
+      {
+        "question": "Is sugar required at that step?",
+        "answer": "no"
+      },
+      {
+        "question": "Should sugar be added later instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_34.jpg",
+    "turns": [
+      {
+        "question": "What should I do before cutting herbs, sausage, and mushrooms?",
+        "answer": "tilt pan slightly"
+      },
+      {
+        "question": "Should the pan be tilted slightly?",
+        "answer": "yes"
+      },
+      {
+        "question": "Should the pan be kept flat?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_35.png",
+    "turns": [
+      {
+        "question": "What is the index of the step when we need to add all purpose flour?",
+        "answer": "third<OR>3"
+      },
+      {
+        "question": "Is that step the third step?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it the second step?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_36.jpg",
+    "turns": [
+      {
+        "question": "What should we add in the third step?",
+        "answer": "milk"
+      },
+      {
+        "question": "Is milk added in the third step?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is flour added instead of milk in that step?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_37.jpg",
+    "turns": [
+      {
+        "question": "What should kids do after snap fingers?",
+        "answer": "hop on one foot"
+      },
+      {
+        "question": "Should they hop on one foot after snapping fingers?",
+        "answer": "yes"
+      },
+      {
+        "question": "Should they clap instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_38.jpg",
+    "turns": [
+      {
+        "question": "What should be drawn in the fourth step?",
+        "answer": "nose"
+      },
+      {
+        "question": "Is the nose drawn in the fourth step?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the mouth drawn in the fourth step?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_39.jpg",
+    "turns": [
+      {
+        "question": "What is the step after using probe to spread tire puncture?",
+        "answer": "remove the repair"
+      },
+      {
+        "question": "Is removing the repair the next step?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is inflating the tire the next step instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_40.png",
+    "turns": [
+      {
+        "question": "What is the second step suggested?",
+        "answer": "identify your audience"
+      },
+      {
+        "question": "Is identifying your audience the second step?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is writing the conclusion the second step?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_41.png",
+    "turns": [
+      {
+        "question": "What is the last strategy given in the image?",
+        "answer": "make a song"
+      },
+      {
+        "question": "Is making a song the last strategy?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is drawing a diagram the last strategy?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_42.png",
+    "turns": [
+      {
+        "question": "What is the average total fueling cost excluding the Ford F150?",
+        "answer": "76.55<OR>76.56"
+      },
+      {
+        "question": "Is the average cost less than 80?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the average cost greater than 70?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_42.png",
+    "turns": [
+      {
+        "question": "What is the highest fueling cost?",
+        "answer": "130.96"
+      },
+      {
+        "question": "Is the highest cost greater than 120?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 100?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_44.png",
+    "turns": [
+      {
+        "question": "Which category did the worst job in plastic recycling, considering the amount of plastic made and thrown out?",
+        "answer": "packaging"
+      },
+      {
+        "question": "Is packaging the worst category for recycling?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is construction the worst category?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_44.png",
+    "turns": [
+      {
+        "question": "What is the difference in metric tonnes between the amount of plastic produced and the amount discarded?",
+        "answer": "105"
+      },
+      {
+        "question": "Is the difference greater than 100 metric tonnes?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the difference less than 50 metric tonnes?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_46.png",
+    "turns": [
+      {
+        "question": "What is the estimated average standing charge for the year 2023?",
+        "answer": "271"
+      },
+      {
+        "question": "Is the standing charge greater than 200?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 300?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_46.png",
+    "turns": [
+      {
+        "question": "What is the estimated total cost for the year 2023?",
+        "answer": "23800"
+      },
+      {
+        "question": "Is the total cost greater than 20000?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 30000?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_48.jpg",
+    "turns": [
+      {
+        "question": "In which direction does the living room window face?",
+        "answer": "north"
+      },
+      {
+        "question": "Does the living room window face north?",
+        "answer": "yes"
+      },
+      {
+        "question": "Does it face south?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_49.jpg",
+    "turns": [
+      {
+        "question": "What are the appliances in the kitchen in this floorplan?",
+        "answer": "oven<AND>dishwasher"
+      },
+      {
+        "question": "Is there an oven in the kitchen?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is there a dishwasher in the kitchen?",
+        "answer": "yes"
+      }
+    ]
+  },
+  {
+    "image": "v1_50.jpg",
+    "turns": [
+      {
+        "question": "Which room is bigger, the double garage or the living room?",
+        "answer": "double garage"
+      },
+      {
+        "question": "Is the double garage bigger than the living room?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the living room bigger than the double garage?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_50.jpg",
+    "turns": [
+      {
+        "question": "Which room is bigger, the master bedroom or the patio?",
+        "answer": "master bedroom"
+      },
+      {
+        "question": "Is the master bedroom bigger than the patio?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the patio bigger than the master bedroom?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_52.png",
+    "turns": [
+      {
+        "question": "What is the solution if the lamp is plugged in and the bulb has burned out?",
+        "answer": "replace blub"
+      },
+      {
+        "question": "Should the bulb be replaced in that case?",
+        "answer": "yes"
+      },
+      {
+        "question": "Should the lamp be unplugged instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_53.png",
+    "turns": [
+      {
+        "question": "Which step in the flowchart is drawn with a diamond shape?",
+        "answer": "water boiled?"
+      },
+      {
+        "question": "Is \"water boiled?\" the step shown in a diamond?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the diamond step \"add tea bag\"?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_54.png",
+    "turns": [
+      {
+        "question": "What is the average wait time to climb out of bed?",
+        "answer": "15 min"
+      },
+      {
+        "question": "Is the average wait time 15 minutes?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it longer than 20 minutes?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_55.png",
+    "turns": [
+      {
+        "question": "Which year has the highest growth rate of median house price?",
+        "answer": "2008"
+      },
+      {
+        "question": "Is 2008 the year with the highest growth rate?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is 2006 the highest year instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_56.png",
+    "turns": [
+      {
+        "question": "What is Japan's gdp in 2012?",
+        "answer": "6,233.15 billion U.S. dollars"
+      },
+      {
+        "question": "Is Japan's GDP in 2012 greater than 6000 billion U.S. dollars?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 5000 billion U.S. dollars?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_57.jpg",
+    "turns": [
+      {
+        "question": "In which years did rowing and athletics have the same number of gold medals?",
+        "answer": "2000<AND>2012"
+      },
+      {
+        "question": "Did rowing and athletics have the same number of gold medals in 2000?",
+        "answer": "yes"
+      },
+      {
+        "question": "Did they have the same number in 2008?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_58.png",
+    "turns": [
+      {
+        "question": "Which department is the person who has the highest salary from?",
+        "answer": "Administration"
+      },
+      {
+        "question": "Is the highest-paid person from the Administration department?",
+        "answer": "yes"
+      },
+      {
+        "question": "Are they from the Finance department?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_58.png",
+    "turns": [
+      {
+        "question": "Based on the table, how much is Wilkins earning?",
+        "answer": "2500<OR>2,500"
+      },
+      {
+        "question": "Is Wilkins earning 2500?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is Wilkins earning more than 3000?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_60.png",
+    "turns": [
+      {
+        "question": "Which country has a below-average profit margin?",
+        "answer": "India"
+      },
+      {
+        "question": "Is India below the average profit margin?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is Australia below the average?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_60.png",
+    "turns": [
+      {
+        "question": "Which country has the highest profit margin?",
+        "answer": "Australia"
+      },
+      {
+        "question": "Does Australia have the highest profit margin?",
+        "answer": "yes"
+      },
+      {
+        "question": "Does India have the highest margin?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_62.png",
+    "turns": [
+      {
+        "question": "In which month is the highest income generated?",
+        "answer": "Feb"
+      },
+      {
+        "question": "Is February the month with the highest income?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is January the highest instead?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_62.png",
+    "turns": [
+      {
+        "question": "What percentage does salary contribute to total income?",
+        "answer": "56.2<OR>0.562"
+      },
+      {
+        "question": "Is the salary contribution more than 50%?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it less than 40%?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_64.png",
+    "turns": [
+      {
+        "question": "Who is the person on the left?",
+        "answer": "Keira Knightley"
+      },
+      {
+        "question": "Is the person on the left Keira Knightley?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the person on the left Emma Watson?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_65.png",
+    "turns": [
+      {
+        "question": "Who is the person in the image?",
+        "answer": "Michelle Yeoh"
+      },
+      {
+        "question": "Is the person Michelle Yeoh?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the person Lucy Liu?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_66.jpg",
+    "turns": [
+      {
+        "question": "Who is the person in the bottom right?",
+        "answer": "Jamie Dornan"
+      },
+      {
+        "question": "Is the person in the bottom right Jamie Dornan?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it Chris Hemsworth?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_67.png",
+    "turns": [
+      {
+        "question": "Which one is unsweetened?",
+        "answer": "oat"
+      },
+      {
+        "question": "Is the oat option unsweetened?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is almond the unsweetened one?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_68.png",
+    "turns": [
+      {
+        "question": "Is this apple organic?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the apple labeled as organic?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it labeled non-organic?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_69.jpg",
+    "turns": [
+      {
+        "question": "What is the calories for the entire bag?",
+        "answer": "275"
+      },
+      {
+        "question": "Is the total calorie count 275?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it more than 300 calories?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_70.png",
+    "turns": [
+      {
+        "question": "What is the name of this dish?",
+        "answer": "mapo tofu"
+      },
+      {
+        "question": "Is this dish mapo tofu?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is this dish sushi?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_71.jpg",
+    "turns": [
+      {
+        "question": "What is the name of this dish?",
+        "answer": "Caprese Salad"
+      },
+      {
+        "question": "Is this dish Caprese Salad?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is this dish Caesar Salad?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_72.png",
+    "turns": [
+      {
+        "question": "What is the name of this dish?",
+        "answer": "pad thai"
+      },
+      {
+        "question": "Is this dish pad thai?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is this dish ramen?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_73.jpg",
+    "turns": [
+      {
+        "question": "What is the make of the car on the left?",
+        "answer": "volkswagen"
+      },
+      {
+        "question": "Is the car on the left a Volkswagen?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it a Toyota?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_74.jpg",
+    "turns": [
+      {
+        "question": "What does this factory make?",
+        "answer": "camera"
+      },
+      {
+        "question": "Does the factory produce cameras?",
+        "answer": "yes"
+      },
+      {
+        "question": "Does it produce cars?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_75.jpg",
+    "turns": [
+      {
+        "question": "what is the green logo on the car?",
+        "answer": "monster"
+      },
+      {
+        "question": "Is the green logo the Monster logo?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it the Red Bull logo?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_76.png",
+    "turns": [
+      {
+        "question": "What is the name of this landmark?",
+        "answer": "Trevi Fountain"
+      },
+      {
+        "question": "Is this landmark the Trevi Fountain?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it the Eiffel Tower?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_77.jpg",
+    "turns": [
+      {
+        "question": "What is the name of this landmark?",
+        "answer": "Anbariya Mosque"
+      },
+      {
+        "question": "Is this landmark Anbariya Mosque?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it Al-Masjid an-Nabawi?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_78.jpg",
+    "turns": [
+      {
+        "question": "What is the name of this landmark?",
+        "answer": "baochu pagoda"
+      },
+      {
+        "question": "Is this Baochu Pagoda?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it the Leaning Tower of Pisa?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_79.jpg",
+    "turns": [
+      {
+        "question": "What is the face value of this banknote?",
+        "answer": "five<OR>5"
+      },
+      {
+        "question": "Is the face value 5?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it 10?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_80.jpg",
+    "turns": [
+      {
+        "question": "What is this banknote?",
+        "answer": "ten pound<OR>10 pound<OR>British pound"
+      },
+      {
+        "question": "Is this a 10 pound British banknote?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is this a US dollar note?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_81.jpg",
+    "turns": [
+      {
+        "question": "What type of currency does this banknote represent?",
+        "answer": "Swede<OR>Kronor"
+      },
+      {
+        "question": "Is this currency Swedish Kronor?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is it Euros?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_82.png",
+    "turns": [
+      {
+        "question": "Which chest xray disease can be found? (Options include: Atelectasis; Cardiomegaly; Effusion; Infiltration; Mass; Nodule; Pneumonia; Pneumothorax; Consolidation; Edema; Emphysema; Fibrosis; Pleural Thickening; Hernia.)",
+        "answer": "Cardiomegaly"
+      },
+      {
+        "question": "Is Cardiomegaly present in this X-ray?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is Pneumonia present?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_83.png",
+    "turns": [
+      {
+        "question": "Which chest xray disease can be found? (Options include: Atelectasis; Cardiomegaly; Effusion; Infiltration; Mass; Nodule; Pneumonia; Pneumothorax; Consolidation; Edema; Emphysema; Fibrosis; Pleural Thickening; Hernia.)",
+        "answer": "Hernia"
+      },
+      {
+        "question": "Is Hernia present in this X-ray?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is Cardiomegaly present?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_84.png",
+    "turns": [
+      {
+        "question": "Which chest xray disease can be found? (Options include: Atelectasis; Cardiomegaly; Effusion; Infiltration; Mass; Nodule; Pneumonia; Pneumothorax; Consolidation; Edema; Emphysema; Fibrosis; Pleural Thickening; Hernia.)",
+        "answer": "Infiltration"
+      },
+      {
+        "question": "Is Infiltration present in this X-ray?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is Pneumothorax present?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_85.jpg",
+    "turns": [
+      {
+        "question": "How many birds are there?",
+        "answer": "6"
+      },
+      {
+        "question": "Are there more than 5 birds?",
+        "answer": "yes"
+      },
+      {
+        "question": "Are there fewer than 4 birds?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_86.jpg",
+    "turns": [
+      {
+        "question": "How many tomatoes are there?",
+        "answer": "5"
+      },
+      {
+        "question": "Are there exactly 5 tomatoes?",
+        "answer": "yes"
+      },
+      {
+        "question": "Are there more than 6 tomatoes?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_87.jpg",
+    "turns": [
+      {
+        "question": "How many books are there?",
+        "answer": "63"
+      },
+      {
+        "question": "Are there more than 60 books?",
+        "answer": "yes"
+      },
+      {
+        "question": "Are there fewer than 50 books?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_88.jpg",
+    "turns": [
+      {
+        "question": "What are all the scene text in the image?",
+        "answer": "S3302CD"
+      },
+      {
+        "question": "Is the text 'S3302CD' present in the image?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the text 'ABC123' present?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_89.jpg",
+    "turns": [
+      {
+        "question": "What are all the scene text in the image?",
+        "answer": "Luxmi Jewellers"
+      },
+      {
+        "question": "Does the image contain the text 'Luxmi Jewellers'?",
+        "answer": "yes"
+      },
+      {
+        "question": "Does it contain the text 'Golden Store'?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+    "image": "v1_90.jpg",
+    "turns": [
+      {
+        "question": "What are all the scene text in the image?",
+        "answer": "have yourself a merry little Christmas"
+      },
+      {
+        "question": "Is the phrase 'have yourself a merry little Christmas' present?",
+        "answer": "yes"
+      },
+      {
+        "question": "Is the phrase 'Happy New Year' present?",
+        "answer": "no"
+      }
+    ]
+  },
+  {
+  "image": "v1_91.jpg",
+  "turns": [
+    {
+      "question": "What are all the scene text in the image?",
+      "answer": "5:30PM<AND>88%<AND>Mario Kart 8 Deluxe<AND>MARIO KART 8 DELUXE<AND>SUPER MARIO ODYSSEY<AND>THE LEGEND OF ZELDA<AND>BREATH OF WILD<AND>Options<AND>Start"
+    },
+    {
+      "question": "Does the image contain the text 'Mario Kart 8 Deluxe'?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the image contain the text 'Start'?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_92.jpg",
+  "turns": [
+    {
+      "question": "What are all the scene text in the image?",
+      "answer": "MR. WILLIAM SHAKESPEARES<AND>COMEDIES, HISTORIES, & TRAGEDIES.<AND>publifhed according to the True Originall Copies."
+    },
+    {
+      "question": "Does the image contain the text 'MR. WILLIAM SHAKESPEARES'?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the image contain the text 'COMEDIES, HISTORIES, & TRAGEDIES.'?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_93.jpg",
+  "turns": [
+    {
+      "question": "What are all the scene text in the image?",
+      "answer": "Connecticut law of 1642<AND>If any man or woman be a witch -- that is, hath or consulteth with a familiar spirit -- they shall be put to death"
+    },
+    {
+      "question": "Does the image contain the text 'Connecticut law of 1642'?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the image mention punishment by death?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_94.jpg",
+  "turns": [
+    {
+      "question": "What is the brand of this device?",
+      "answer": "MOTOROLA"
+    },
+    {
+      "question": "Is the device brand Motorola?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the device brand Samsung?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_95.jpg",
+  "turns": [
+    {
+      "question": "What is the license plate number?",
+      "answer": "AED-632"
+    },
+    {
+      "question": "Is the license plate number AED-632?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the license plate number AFD-632?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_96.jpg",
+  "turns": [
+    {
+      "question": "What are all the French scene text in the image?",
+      "answer": "HISTOIRE DE FRANCE<AND>De La préhistoire à ans jours<AND>Queelle Histoire"
+    },
+    {
+      "question": "Does the image contain the text 'HISTOIRE DE FRANCE'?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the image contain the text 'Queelle Histoire'?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_97.jpg",
+  "turns": [
+    {
+      "question": "What are all the Chinese scene text in the image?",
+      "answer": "马曳<AND>著<AND>每个人都有自己的困境<AND>但总会被光亮吸引<AND>身不由己地慢慢靠近"
+    },
+    {
+      "question": "Does the image contain the text '每个人都有自己的困境'?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the image contain the text '身不由己地慢慢靠近'?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_98.jpg",
+  "turns": [
+    {
+      "question": "Which continent is highlighted?",
+      "answer": "Asia"
+    },
+    {
+      "question": "Is the highlighted continent Asia?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it Europe?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_99.png",
+  "turns": [
+    {
+      "question": "Which are producers in this food web?",
+      "answer": "Phytoplankton<AND>Seaweed"
+    },
+    {
+      "question": "Is phytoplankton a producer in this food web?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is seaweed also a producer?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_100.png",
+  "turns": [
+    {
+      "question": "Compare the average kinetic energies of the particles in each sample. The diagrams below show two pure samples of gas in identical closed, rigid containers. Each colored ball represents one gas particle. Both samples have the same number of particles. Which sample has the higher temperature? Sample A or sample B?",
+      "answer": "sample A"
+    },
+    {
+      "question": "Does sample A have the higher temperature?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does sample B have the higher temperature?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_101.png",
+  "turns": [
+    {
+      "question": "Which of these highlighted cities is the farthest north?",
+      "answer": "CHICAGO"
+    },
+    {
+      "question": "Is Chicago the northernmost city shown?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is New York the farthest north?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_102.png",
+  "turns": [
+    {
+      "question": "Where is this photo taken?",
+      "answer": "turkey<OR>syria"
+    },
+    {
+      "question": "Is the photo taken in Turkey?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it taken in Germany?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_103.png",
+  "turns": [
+    {
+      "question": "Where is this photo taken?",
+      "answer": "oscar<AND>2023"
+    },
+    {
+      "question": "Is this photo taken at the Oscars 2023?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it from the Cannes Film Festival?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_104.png",
+  "turns": [
+    {
+      "question": "Where is this photo taken?",
+      "answer": "qatar"
+    },
+    {
+      "question": "Is this photo taken in Qatar?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it taken in Dubai?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_105.png",
+  "turns": [
+    {
+      "question": "In which country was this photo taken?",
+      "answer": "australia"
+    },
+    {
+      "question": "Is this photo taken in Australia?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it taken in Canada?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_106.jpg",
+  "turns": [
+    {
+      "question": "Are the trees taller than the giraffes?",
+      "answer": "no"
+    },
+    {
+      "question": "Are the giraffes taller than the trees?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are both the same height?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_107.jpg",
+  "turns": [
+    {
+      "question": "Is this airplane taking off or landing?",
+      "answer": "taking off"
+    },
+    {
+      "question": "Is the airplane taking off?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it landing?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_108.jpg",
+  "turns": [
+    {
+      "question": "How many people are sitting down?",
+      "answer": "one"
+    },
+    {
+      "question": "Is only one person sitting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are two people sitting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_109.jpg",
+  "turns": [
+    {
+      "question": "Is the trash empty or full?",
+      "answer": "empty"
+    },
+    {
+      "question": "Is the trash empty?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it full?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_110.jpg",
+  "turns": [
+    {
+      "question": "Does the giraffe appear dangerous?",
+      "answer": "no"
+    },
+    {
+      "question": "Does the giraffe appear harmless?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it look aggressive?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_111.jpg",
+  "turns": [
+    {
+      "question": "Is there any reflection of zebra in water?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the zebra reflected in the water?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is there no reflection visible?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_112.jpg",
+  "turns": [
+    {
+      "question": "Is the man happy?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the man appear to be smiling?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does he look sad?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_113.jpg",
+  "turns": [
+    {
+      "question": "Are all of the cats the same color?",
+      "answer": "no"
+    },
+    {
+      "question": "Do the cats have different colors?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are all the cats identical in appearance?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_114.jpg",
+  "turns": [
+    {
+      "question": "Is that wine in the background?",
+      "answer": "no"
+    },
+    {
+      "question": "Is the drink in the background not wine?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it wine?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_115.jpg",
+  "turns": [
+    {
+      "question": "Is the man going to fall down?",
+      "answer": "no"
+    },
+    {
+      "question": "Does the man appear stable?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is he losing balance?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_116.jpg",
+  "turns": [
+    {
+      "question": "What place is pictured?",
+      "answer": "shore"
+    },
+    {
+      "question": "Is the scene near a shore?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a mountain scene?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_117.jpg",
+  "turns": [
+    {
+      "question": "Is it outdoors?",
+      "answer": "no"
+    },
+    {
+      "question": "Is the scene indoors?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it outside?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_118.jpg",
+  "turns": [
+    {
+      "question": "How's the weather?",
+      "answer": "clear<OR>sunny"
+    },
+    {
+      "question": "Is the weather sunny?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it cloudy?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_119.jpg",
+  "turns": [
+    {
+      "question": "What is the color of the fence made of metal?",
+      "answer": "green"
+    },
+    {
+      "question": "Is the metal fence green?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the fence red?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_120.jpg",
+  "turns": [
+    {
+      "question": "Does the person to the left of the man appear to be sitting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the person to the left sitting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the person standing?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_121.jpg",
+  "turns": [
+    {
+      "question": "Is the plate of the table both dirty and silver?",
+      "answer": "no"
+    },
+    {
+      "question": "Is the plate silver?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the plate both dirty and silver at the same time?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_122.jpg",
+  "turns": [
+    {
+      "question": "Is the curtain on the right side or on the left of the picture?",
+      "answer": "left"
+    },
+    {
+      "question": "Is the curtain on the left side?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it on the right side?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_123.jpg",
+  "turns": [
+    {
+      "question": "Is there a computer in this photo?",
+      "answer": "no"
+    },
+    {
+      "question": "Does the image contain a computer?",
+      "answer": "no"
+    },
+    {
+      "question": "Is there any laptop or desktop visible?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_124.jpg",
+  "turns": [
+    {
+      "question": "Are there napkins under the utensil to the left of the rice?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are napkins placed under the utensil?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are there no napkins under it?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_125.jpg",
+  "turns": [
+    {
+      "question": "Are there nuts or vegetables?",
+      "answer": "no"
+    },
+    {
+      "question": "Are there any vegetables present?",
+      "answer": "no"
+    },
+    {
+      "question": "Are there nuts in the image?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_126.jpg",
+  "turns": [
+    {
+      "question": "Are there both plates and forks in this picture?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are both plates and forks visible?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are there only plates and no forks?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_127.jpg",
+  "turns": [
+    {
+      "question": "What is this bird called?",
+      "answer": "parrot<OR>conure"
+    },
+    {
+      "question": "Is this bird a parrot?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a sparrow?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_128.jpg",
+  "turns": [
+    {
+      "question": "Which animal in the picture is larger, the cat or the dog?",
+      "answer": "cat"
+    },
+    {
+      "question": "Is the cat larger than the dog?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the dog larger than the cat?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_129.jpg",
+  "turns": [
+    {
+      "question": "On the right desk, what is to the left of the laptop?",
+      "answer": "table lamp<OR>desk lamp"
+    },
+    {
+      "question": "Is there a desk lamp to the left of the laptop?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is there a book to the left of the laptop?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_130.jpg",
+  "turns": [
+    {
+      "question": "Does the man ride a horse?",
+      "answer": "no"
+    },
+    {
+      "question": "Is the man riding any animal?",
+      "answer": "no"
+    },
+    {
+      "question": "Is he standing instead?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_131.jpg",
+  "turns": [
+    {
+      "question": "Is the surfer to the left or to the right of the surfboard?",
+      "answer": "left"
+    },
+    {
+      "question": "Is the surfer on the left side of the surfboard?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the surfer on the right side?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_132.jpg",
+  "turns": [
+    {
+      "question": "What is the lamp on, a side table or a nightstand?",
+      "answer": "side table"
+    },
+    {
+      "question": "Is the lamp placed on a side table?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it placed on a nightstand?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_133.jpg",
+  "turns": [
+    {
+      "question": "What do both the stump and the fence have in common?",
+      "answer": "material"
+    },
+    {
+      "question": "Are both the stump and the fence made of the same material?",
+      "answer": "yes"
+    },
+    {
+      "question": "Do they differ in material?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_134.jpg",
+  "turns": [
+    {
+      "question": "Is the spoon made of the same material as the chopsticks?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are both the spoon and chopsticks made of the same material?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are they made of different materials?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_135.jpg",
+  "turns": [
+    {
+      "question": "Does the shirt have a different color than the kite?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are the shirt and kite different in color?",
+      "answer": "yes"
+    },
+    {
+      "question": "Do they share the same color?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_136.jpg",
+  "turns": [
+    {
+      "question": "Do all these people have the same gender?",
+      "answer": "no"
+    },
+    {
+      "question": "Are there people of different genders in the image?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are all individuals the same gender?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_137.jpg",
+  "turns": [
+    {
+      "question": "Are these two animals different species?",
+      "answer": "yes"
+    },
+    {
+      "question": "Do the two animals belong to different species?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are they the same species?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_138.jpg",
+  "turns": [
+    {
+      "question": "Where are the persons? Answer it and give the rationale.",
+      "answer": "They are in a college classroom. I think so because the young woman appears to be college age, and they are surrounded by desks and chairs."
+    },
+    {
+      "question": "Are the persons in a classroom setting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the setting likely a college classroom?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_139.jpg",
+  "turns": [
+    {
+      "question": "Why are the persons wearing black clothes? Answer it and give the rationale.",
+      "answer": "They are going to a funeral. I think so because it is traditional for people to wear black to a funeral."
+    },
+    {
+      "question": "Are the persons likely attending a funeral?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is wearing black associated with mourning?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_140.jpg",
+  "turns": [
+    {
+      "question": "Why is the woman wearing a robe? Answer it and give the rationale.",
+      "answer": "She is getting ready for bed. I think so because the room appears to be a bedroom and the woman is headed in the general direction of her bed."
+    },
+    {
+      "question": "Is the woman preparing to sleep?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is she dressed for going outside?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_141.jpg",
+  "turns": [
+    {
+      "question": "Where is this happening? Answer it and give the rationale.",
+      "answer": "This is happening in a fancy restaurant. I think so because the man is dressed fancily and the background is fancy."
+    },
+    {
+      "question": "Is this scene taking place in a restaurant?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it happening in a casual outdoor setting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_142.jpg",
+  "turns": [
+    {
+      "question": "Is it summertime in the scene? Answer it and give the rationale.",
+      "answer": "No, it looks to be fall. I think so because there are pumpkins in the background and they are normally associated with fall."
+    },
+    {
+      "question": "Does the scene suggest fall season?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it look like summer?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_143.jpg",
+  "turns": [
+    {
+      "question": "Is the woman in red going to be mad at the man, for looking at the woman in dress? Answer it and give the rationale.",
+      "answer": "Yes, the woman in red and the man appear to be a couple and the woman in red would not appreciate the man checking out other women. I think so because in a monogamous relationship, partners are expected to be faithful to one another."
+    },
+    {
+      "question": "Does the man appear to be looking at another woman?",
+      "answer": "yes"
+    },
+    {
+      "question": "Would this likely upset the woman in red?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_144.jpg",
+  "turns": [
+    {
+      "question": "Why does the woman have both of her hands in the air? Answer it and give the rationale.",
+      "answer": "She just shot a basketball. I think so because her arms are angled for a basketball shot and they are in a basketball arena."
+    },
+    {
+      "question": "Is the woman playing basketball?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is she celebrating instead of shooting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_145.jpg",
+  "turns": [
+    {
+      "question": "What kind of school does the boy go to? Answer it and give the rationale.",
+      "answer": "The boy goes to a private school, not a public school. I think so because the boy is all dressed up in a suit, public schools don't require that but some private schools do."
+    },
+    {
+      "question": "Does the boy likely attend a private school?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is he likely attending a public school?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_146.jpg",
+  "turns": [
+    {
+      "question": "Do the persons live in this house? Answer it and give the rationale.",
+      "answer": "No they do not. I think so because they are all looking around at the paintings and decorations, which one would not do if they were used to seeing them."
+    },
+    {
+      "question": "Do the people appear unfamiliar with the house?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are they likely the residents?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_147.jpg",
+  "turns": [
+    {
+      "question": "Why are the man and woman in white so close to each other? Answer it and give the rationale.",
+      "answer": "They just got married. I think so because they're in wedding clothing and everyone is looking at them."
+    },
+    {
+      "question": "Do they appear to be a couple?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it look like a wedding setting?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_148.jpg",
+  "turns": [
+    {
+      "question": "Can you explain this meme?",
+      "answer": "This meme is a humorous take on procrastination and the tendency to delay tasks until a specific time. The person in the meme plans to do something at 8 o'clock, but when they miss that deadline by a few minutes, they decide to wait until 9 o'clock instead. The image of Kermit the Frog lying in bed represents the person's laziness and lack of motivation to complete the task."
+    },
+    {
+      "question": "Is the meme about procrastination?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the person delaying the task?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_149.jpg",
+  "turns": [
+    {
+      "question": "Can you explain this meme?",
+      "answer": "This meme is a commentary on the current situation of online learning due to the COVID-19 pandemic. It shows how different parties are affected by it.\\n\\nThe first two images show the Zoom company and the teachers throwing money in the air, which implies that they are profiting from the situation. Zoom, in particular, has seen a surge in usage and revenue due to the pandemic.\\n\\nThe third image shows the WiFi company also throwing money in the air, which implies that they are also profiting from the situation as more people are using the internet for online learning.\\n\\nThe last image shows a student with a sad clown face, which implies that students are not benefiting from the situation and are struggling with online learning. The \"Put on a happy face\" sign in the background further emphasizes the idea that students are putting on a brave face despite their struggles."
+    },
+    {
+      "question": "Does the meme show that companies benefit while students struggle?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are students portrayed as happy in the meme?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_150.jpg",
+  "turns": [
+    {
+      "question": "Can you explain this meme?",
+      "answer": "This meme is poking fun at the fact that the names of the countries Iceland and Greenland are misleading. Despite its name, Iceland is known for its beautiful green landscapes, while Greenland is mostly covered in ice and snow. The meme is saying that the person has trust issues because the names of these countries do not accurately represent their landscapes."
+    },
+    {
+      "question": "Is the meme about misleading country names?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does Greenland have more ice than Iceland?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_151.jpg",
+  "turns": [
+    {
+      "question": "Can you explain this meme?",
+      "answer": "This meme is poking fun at how a student's handwriting deteriorates during an exam. The first two pages show neat and legible handwriting, the middle page shows slightly messier handwriting, and the last two pages show completely illegible scribbles. This is likely due to the student becoming tired or rushed as the exam progresses."
+    },
+    {
+      "question": "Does the handwriting get worse over time?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the handwriting consistent throughout?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_152.jpg",
+  "turns": [
+    {
+      "question": "Can you explain this meme?",
+      "answer": "This meme is a joke about how new college students (freshmen) are often eager to take notes and learn everything they can in class. The image is from the cartoon SpongeBob SquarePants, where SpongeBob and Patrick are frantically writing down notes. The caption implies that the freshmen are so eager to learn that they are even writing down the professor's greeting."
+    },
+    {
+      "question": "Are freshmen shown as overly eager?",
+      "answer": "yes"
+    },
+    {
+      "question": "Are they ignoring the lecture?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_153.jpg",
+  "turns": [
+    {
+      "question": "What is funny about this image?",
+      "answer": "It is a cartoon of a rhinoceros painting a picture and each picture has its rhino horn because the rhino horn grows in front of its eyes. The caption \"You see the world as you are!\" is a playful commentary on how our perspective shapes our perception of the world."
+    },
+    {
+      "question": "Is the humor based on perspective?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does the rhino paint what it sees including its horn?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_154.png",
+  "turns": [
+    {
+      "question": "What is funny about this image?",
+      "answer": "There are a few things that people might find funny about this image: The contrast between the two images, the absurdity of the cat sitting at a dinner table, and the cat's expression reacting to the situation."
+    },
+    {
+      "question": "Is the humor based on contrast between humans and a cat?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the situation normal for a cat?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_155.png",
+  "turns": [
+    {
+      "question": "What occasions would someone use this meme?",
+      "answer": "It is used to express sleepiness, procrastination, or conflicting desires about sleep."
+    },
+    {
+      "question": "Is this meme about feeling sleepy?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it about being energetic?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_156.jpg",
+  "turns": [
+    {
+      "question": "What occasions would someone use this meme?",
+      "answer": "It is used to express shock, surprise, or fear."
+    },
+    {
+      "question": "Is the meme used for surprise?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it used for calm situations?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_157.jpg",
+  "turns": [
+    {
+      "question": "What occasions would someone use this meme?",
+      "answer": "It is used to express distress, vulnerability, or seeking comfort."
+    },
+    {
+      "question": "Is the meme about emotional distress?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it about excitement?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_158.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Hungarian Mushroom Soup is made by sautéing onions and mushrooms, adding broth and spices, then mixing in milk and flour, and finishing with sour cream and seasoning."
+    },
+    {
+      "question": "Does this dish involve mushrooms?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a dessert?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_159.jpg",
+  "turns": [
+    {
+      "question": "How to make this?",
+      "answer": "Sparkling Cantaloupe Agua Fresca is made by blending cantaloupe with water, lime juice, honey, and salt, then adding club soda before serving."
+    },
+    {
+      "question": "Is cantaloupe used in this drink?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a hot drink?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_160.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Ginger Glazed Mahi Mahi is made by marinating fish in a sweet soy-ginger mixture, cooking it in a skillet, and reducing the marinade into a glaze."
+    },
+    {
+      "question": "Is fish used in this dish?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is this a vegetarian dish?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_161.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Strawberry Rhubarb Pie is made by mixing sugar and flour, adding strawberries and rhubarb, placing in a pie crust, and baking until golden."
+    },
+    {
+      "question": "Does this dish use strawberries?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is this a savory dish?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_162.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Egg rolls are made by cooking filling, wrapping it in wrappers, and deep frying until golden."
+    },
+    {
+      "question": "Is this dish fried?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it baked instead?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_163.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Peanut butter crackers are sandwiched, dipped in melted chocolate, and cooled until set."
+    },
+    {
+      "question": "Is chocolate used in this recipe?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a savory meal?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_164.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Broccoli and carrot stir fry is made by boiling vegetables briefly and stir frying with seasoning."
+    },
+    {
+      "question": "Are vegetables the main ingredient?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it contain meat?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_165.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Sushi rolls are made by cooking rice, placing fillings on seaweed, rolling, and slicing."
+    },
+    {
+      "question": "Is rice used in this dish?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it deep fried?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_166.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Sweet potato chickpea curry is made by cooking vegetables with spices, coconut milk, and simmering."
+    },
+    {
+      "question": "Is this dish vegan?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it contain meat?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_167.jpg",
+  "turns": [
+    {
+      "question": "How to cook this dish?",
+      "answer": "Lime chicken tacos are made by cooking chicken with seasoning and serving in tortillas with toppings."
+    },
+    {
+      "question": "Is chicken used in this dish?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a dessert?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_168.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Shawshank Redemption is about a banker wrongly imprisoned who forms a friendship and finds hope over years in prison."
+    },
+    {
+      "question": "Is the movie set in a prison?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the main character guilty?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_169.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Godfather follows a powerful crime family and the transformation of Michael Corleone into a mafia leader."
+    },
+    {
+      "question": "Is the movie about a crime family?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a comedy film?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_170.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Dark Knight shows Batman battling the Joker, who spreads chaos in Gotham City."
+    },
+    {
+      "question": "Is the Joker the main villain?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is this a romantic movie?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_171.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "Twelve Angry Men is about jurors debating a murder case and uncovering reasonable doubt."
+    },
+    {
+      "question": "Does the movie take place mostly in one room?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it about war?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_172.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "Schindler's List tells the story of a man who saves Jewish lives during the Holocaust."
+    },
+    {
+      "question": "Is this movie based on real events?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a science fiction film?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_173.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Return of the King follows the final battle to defeat Sauron and destroy the One Ring."
+    },
+    {
+      "question": "Is the story set in a fantasy world?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it set in modern times?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_174.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "Pulp Fiction is a crime film with interconnected stories involving violence and dark humor."
+    },
+    {
+      "question": "Does the movie have multiple storylines?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a linear storyline?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_175.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Fellowship of the Ring follows a group tasked with destroying a powerful ring in a fantasy world."
+    },
+    {
+      "question": "Is this part of a trilogy?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it set in modern times?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_176.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "The Godfather Part II shows Michael Corleone’s rise while also telling the backstory of his father."
+    },
+    {
+      "question": "Does it include both past and present timelines?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it unrelated to the first movie?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_177.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this movie?",
+      "answer": "Farewell My Concubine follows two opera performers and their lives through political changes in China."
+    },
+    {
+      "question": "Is it set across multiple time periods?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a comedy film?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_178.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "The Mona Lisa is a famous Renaissance portrait known for its mysterious expression."
+    },
+    {
+      "question": "Is it painted by Leonardo da Vinci?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a landscape painting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_179.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "Girl with a Pearl Earring is a portrait by Vermeer featuring a girl wearing a pearl earring."
+    },
+    {
+      "question": "Is it a portrait?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it painted by Van Gogh?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_180.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "The Starry Night is a painting by Van Gogh showing a swirling night sky over a village."
+    },
+    {
+      "question": "Is the painting known for its swirling sky?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it painted in a realistic style?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_181.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "The Kiss by Klimt shows a couple embracing, decorated with gold patterns."
+    },
+    {
+      "question": "Is gold a major element in the painting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a black-and-white sketch?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_182.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "The Birth of Venus shows the goddess Venus emerging from the sea and arriving on shore."
+    },
+    {
+      "question": "Is this painting from the Renaissance?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it depict a mythological subject?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_183.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "Whistler’s Mother is a portrait of the artist’s mother, known for its simplicity and composition."
+    },
+    {
+      "question": "Is this a portrait painting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it painted by Van Gogh?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_184.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "The Arnolfini Portrait shows a couple indoors and is famous for its detail and symbolism."
+    },
+    {
+      "question": "Does the painting include a mirror?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a landscape painting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_185.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "Along the River During the Qingming Festival shows daily life in a busy Chinese city."
+    },
+    {
+      "question": "Does it depict everyday life?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a single portrait?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_186.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "Dwelling in the Fuchun Mountains is a long landscape painting showing natural scenery."
+    },
+    {
+      "question": "Is this a landscape painting?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it a modern digital artwork?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_187.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this painting?",
+      "answer": "Emperor Taizong Receiving the Tibetan Envoy shows a diplomatic meeting in ancient China."
+    },
+    {
+      "question": "Does it depict a historical event?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it fictional fantasy?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_188.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Cedar apple rust is a fungal disease affecting apple and juniper trees, treated by removing infected parts and using fungicides."
+    },
+    {
+      "question": "Is this disease caused by fungus?",
+      "answer": "yes"
+    },
+    {
+      "question": "Can it spread directly between apple trees?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_189.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Anthracnose is a fungal disease causing dark lesions on plants, treated by removing infected debris and using fungicides."
+    },
+    {
+      "question": "Is this caused by fungi?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does dry weather promote it?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_190.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Bacterial canker affects stone fruits causing lesions, treated by pruning infected parts and disinfecting tools."
+    },
+    {
+      "question": "Is this a bacterial disease?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it caused by fungus?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_191.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Blossom end rot is a nutrient-related disorder causing dark spots on fruits, prevented by proper watering and calcium supply."
+    },
+    {
+      "question": "Is this caused by calcium deficiency?",
+      "answer": "yes"
+    },
+    {
+      "question": "Can fungicides fix it?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_192.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Brown rot is a fungal disease affecting fruit, treated by removing infected parts and applying fungicides."
+    },
+    {
+      "question": "Does it affect fruit crops?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it harmless to crops?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_193.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Club root is a soil-borne disease causing swollen roots, managed by crop rotation and soil pH control."
+    },
+    {
+      "question": "Does it affect plant roots?",
+      "answer": "yes"
+    },
+    {
+      "question": "Can fungicides easily cure it?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_194.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Corn smut is a fungal disease forming galls on corn, controlled by removing infected parts and using resistant varieties."
+    },
+    {
+      "question": "Does it form galls on corn?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is chemical control very effective?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_195.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Crown gall is a bacterial disease causing tumor-like growths, managed by removing infected plants and avoiding wounds."
+    },
+    {
+      "question": "Is this caused by bacteria?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does it spread only through air?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_196.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Gray mold is a fungal disease causing soft gray rot on plants, treated by improving airflow and using fungicides."
+    },
+    {
+      "question": "Does it spread in humid conditions?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it caused by bacteria?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_197.jpg",
+  "turns": [
+    {
+      "question": "What is this disease (give short introduction) and how to treat it?",
+      "answer": "Early blight is a fungal disease causing spots on leaves, controlled by sanitation and fungicides."
+    },
+    {
+      "question": "Does it form ring-like spots?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is it harmless to crops?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_198.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Isaac Newton was a scientist who developed laws of motion and gravity."
+    },
+    {
+      "question": "Did he contribute to physics?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a modern politician?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_199.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Confucius was a Chinese philosopher whose teachings shaped East Asian culture."
+    },
+    {
+      "question": "Was he a philosopher?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a scientist?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_200.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Cai Lun is credited with improving papermaking in ancient China."
+    },
+    {
+      "question": "Is he linked to paper invention?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a European explorer?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_201.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Christopher Columbus was an explorer who reached the Americas during European voyages."
+    },
+    {
+      "question": "Did he cross the Atlantic Ocean?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a physicist?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_202.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Albert Einstein was a physicist known for the theory of relativity."
+    },
+    {
+      "question": "Did he develop relativity?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he known for painting?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_203.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Louis Pasteur was a scientist who developed vaccines and advanced microbiology."
+    },
+    {
+      "question": "Did he contribute to medicine?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a political leader?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_204.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Galileo was an astronomer and physicist who helped develop modern science."
+    },
+    {
+      "question": "Did he study astronomy?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a modern computer scientist?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_205.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Emperor Norton was a San Francisco resident who declared himself emperor."
+    },
+    {
+      "question": "Was he an actual monarch?",
+      "answer": "no"
+    },
+    {
+      "question": "Did he live in the United States?",
+      "answer": "yes"
+    }
+  ]
+},
+{
+  "image": "v1_206.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Lionel Messi is a famous footballer widely considered one of the greatest players."
+    },
+    {
+      "question": "Is he a professional athlete?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is he a scientist?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_207.jpg",
+  "turns": [
+    {
+      "question": "Can you give a short introduction to this person?",
+      "answer": "Alan Turing was a mathematician and computer scientist who helped develop computing."
+    },
+    {
+      "question": "Is he known for computer science?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was he a sports player?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_208.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the graph.",
+      "answer": "Immigration and emigration increased over time, with immigration higher and net migration peaking around 2004 and 2007."
+    },
+    {
+      "question": "Was immigration higher than emigration?",
+      "answer": "yes"
+    },
+    {
+      "question": "Did net migration stay constant?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_209.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the graph and table.",
+      "answer": "Global water use increased, mainly for agriculture, and Brazil used far more water per person than the Congo."
+    },
+    {
+      "question": "Is agriculture the largest water user?",
+      "answer": "yes"
+    },
+    {
+      "question": "Does Congo use more water per person than Brazil?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_210.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the charts.",
+      "answer": "Marriage rates declined while divorce peaked around 1980, and fewer adults were married in 2000."
+    },
+    {
+      "question": "Did marriage rates decrease over time?",
+      "answer": "yes"
+    },
+    {
+      "question": "Did divorce rates remain constant?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_211.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the chart.",
+      "answer": "Britain spent the most on consumer goods, especially photographic film, while Germany spent the least."
+    },
+    {
+      "question": "Did Britain spend more than other countries?",
+      "answer": "yes"
+    },
+    {
+      "question": "Was Germany the highest spender?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_212.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the table.",
+      "answer": "Older metro systems are larger and busier, with Tokyo having the most passengers."
+    },
+    {
+      "question": "Is London the oldest system?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is Tokyo the least used?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_213.jpg",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the table.",
+      "answer": "Food takes the largest share of spending in all countries, while leisure is the lowest."
+    },
+    {
+      "question": "Is food the highest spending category?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is leisure the highest category?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_214.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the charts.",
+      "answer": "Electricity production increased, with coal dominant in Australia and nuclear in France."
+    },
+    {
+      "question": "Did nuclear power dominate in France?",
+      "answer": "yes"
+    },
+    {
+      "question": "Did coal dominate in France?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_215.jpg",
+  "turns": [
+    {
+      "question": "Summarize the development shown in the map.",
+      "answer": "The village expanded along roads, railways, and later motorways over time."
+    },
+    {
+      "question": "Did transport influence growth?",
+      "answer": "yes"
+    },
+    {
+      "question": "Did the village shrink over time?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_216.png",
+  "turns": [
+    {
+      "question": "Summarize the information shown in the map.",
+      "answer": "S1 is outside town with road access, while S2 is central but restricted by traffic rules."
+    },
+    {
+      "question": "Is S2 located in the town center?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is S1 inside the town center?",
+      "answer": "no"
+    }
+  ]
+},
+{
+  "image": "v1_217.png",
+  "turns": [
+    {
+      "question": "Summarize the process shown in the diagram.",
+      "answer": "Weather data is collected from satellites, radar, and buoys, analyzed, prepared, and broadcast to the public."
+    },
+    {
+      "question": "Is data collected from multiple sources?",
+      "answer": "yes"
+    },
+    {
+      "question": "Is the final output delivered to the public?",
+      "answer": "yes"
+    }
+  ]
+}
+]
