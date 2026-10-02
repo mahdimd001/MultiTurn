@@ -1,0 +1,397 @@
+#!/bin/bash
+
+#SBATCH --time=1:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+#SBATCH --nodelist=nova21-gpu-8
+#SBATCH --partition=nova
+#SBATCH --job-name="sweep_alpha_beta-0"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_13b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+#python run_alpha_beta_sweep.py
+
+# python3 convert_rouge_qwen.py \
+#  	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#  	--data-path ./mm-vet/mm-vet.json \
+#  	--image-path ./mm-vet/images
+
+# python3 v2-eval-rouge.py \
+# 	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/Qwen-VL \
+#     --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/playground/data/mm-vet/rouge-Qwen-VL-mm-vet.json \
+# 	--image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+# 	--eval-samples 218 \
+# 	--method "elastic" \
+#     --ratio 0.4 \
+#     --exp-name "test-llava-7b-rouge"
+
+#python3 eval_generate.py \
+#	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+ # 	--data-path ./mm-vet/mm-vet.json \
+ # 	--image-path ./mm-vet/images
+#	--method "elastic" \
+ # 	--ratio 0.2
+
+#python eval_ppl.py --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#                    --data-path ./mm-vet/mm-vet.json \
+#    	            --image-path ./mm-vet/images \
+#                     --eval-samples 218 \
+#                    --method "elastic" \
+#	                --ratio 0.4 \
+#	                --exp-name "test1"
+
+#python eval_ppl.py \
+#    --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#    --data-path ./mm-vet/mm-vet.json \
+#    --image-path ./mm-vet/images \
+#    --eval-samples 3 \
+#    --method "multimodal_helastic_seg" \
+#    --segregate-merge \
+#    --conn-weight 0.8 \
+#    --ratio 0.4 \
+#    --exp-name "seg_diag2"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.1 --eval-samples 218 --exp-name "baseline_final0.1"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.2 --eval-samples 218 --exp-name "baseline_final0.2"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.3 --eval-samples 218 --exp-name "baseline_final0.3"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.4 --eval-samples 218 --exp-name "baseline_final0.4"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.5 --eval-samples 218 --exp-name "baseline_final0.5"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.6 --eval-samples 218 --exp-name "baseline_final0.6"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.7 --eval-samples 218 --exp-name "baseline_final0.7"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.8 --eval-samples 218 --exp-name "baseline_final0.8"
+
+# python eval_ppl.py  \
+#         --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic --conn-weight 0.8 --ratio 0.9 --eval-samples 218 --exp-name "baseline_final0.9"
+
+# #------------------------
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.1 --eval-samples 218 --exp-name "seg_final0.1"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.2 --eval-samples 218 --exp-name "seg_final0.2"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.3 --eval-samples 218 --exp-name "seg_final0.3"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.4 --eval-samples 218 --exp-name "seg_final0.4"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.5 --eval-samples 218 --exp-name "seg_final0.5"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.6 --eval-samples 218 --exp-name "seg_final0.6"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.7 --eval-samples 218 --exp-name "seg_final0.7"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.8 --eval-samples 218 --exp-name "seg_final0.8"   
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg \
+#     --segregate-merge --conn-weight 0.8 --ratio 0.9 --eval-samples 218 --exp-name "seg_final0.9"
+# #--------------------
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.1 \
+#     --exp-name "seg_index_distance_only0.1"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.2 \
+#     --exp-name "seg_index_distance_only0.2"
+    
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.3 \
+#     --exp-name "seg_index_distance_only0.3"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.4 \
+#     --exp-name "seg_index_distance_only0.4"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.5 \
+#     --exp-name "seg_index_distance_only0.5"
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --eval-samples 218 \
+#     --method "multimodal_helastic_seg" \
+#     --segregate-merge \
+#     --no-grid-distance \
+#     --conn-weight 0.8 \
+#     --ratio 0.6 \
+#     --exp-name "seg_index_distance_only0.6"
+
+python eval_ppl.py \
+    --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --eval-samples 218 \
+    --method "multimodal_helastic_seg" \
+    --segregate-merge \
+    --no-grid-distance \
+    --conn-weight 0.8 \
+    --ratio 0.7 \
+    --exp-name "seg_index_distance_only0.7"
+
+python eval_ppl.py \
+    --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --eval-samples 218 \
+    --method "multimodal_helastic_seg" \
+    --segregate-merge \
+    --no-grid-distance \
+    --conn-weight 0.8 \
+    --ratio 0.8 \
+    --exp-name "seg_index_distance_only0.8"
+
+python eval_ppl.py \
+    --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --eval-samples 218 \
+    --method "multimodal_helastic_seg" \
+    --segregate-merge \
+    --no-grid-distance \
+    --conn-weight 0.8 \
+    --ratio 0.9 \
+    --exp-name "seg_index_distance_only0.9"
+#---------------------
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.1 --eval-samples 218 --exp-name "elastic_final0.1"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.2 --eval-samples 218 --exp-name "elastic_final0.2"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.3 --eval-samples 218 --exp-name "elastic_final0.3"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.4 --eval-samples 218 --exp-name "elastic_final0.4"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.5 --eval-samples 218 --exp-name "elastic_final0.5"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.6 --eval-samples 218 --exp-name "elastic_final0.6"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.7 --eval-samples 218 --exp-name "elastic_final0.7"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.8 --eval-samples 218 --exp-name "elastic_final0.8"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method elastic --ratio 0.9 --eval-samples 218 --exp-name "elastic_final0.9"
+#--------------------
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.1 --eval-samples 218 --exp-name "h20_final0.1"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.2 --eval-samples 218 --exp-name "h20_final0.2"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.3 --eval-samples 218 --exp-name "h20_final0.3"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.4 --eval-samples 218 --exp-name "h20_final0.4"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.5 --eval-samples 218 --exp-name "h20_final0.5"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.6 --eval-samples 218 --exp-name "h20_final0.6"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.7 --eval-samples 218 --exp-name "h20_final0.7"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.8 --eval-samples 218 --exp-name "h20_final0.8"
+
+python eval_ppl.py  \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+    --data-path ./mm-vet/mm-vet.json \
+    --image-path ./mm-vet/images \
+    --method h2o --ratio 0.9 --eval-samples 218 --exp-name "h20_final0.9"

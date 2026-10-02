@@ -1,0 +1,20 @@
+{
+  "measurement_scope": "teacher_forced_ppl_pass",
+  "ttft_scope": "multimodal_model_prefill_only",
+  "tpot_scope": "known_answer_token_commit_forwards",
+  "num_items": 577,
+  "mean_ttft_model_seconds": 0.0792001325361095,
+  "mean_teacher_forced_tpot_seconds": 0.023092983736487653,
+  "mean_teacher_forced_answer_tokens_per_second": 43.30608923517673,
+  "peak_materialized_kv_bytes": 3482845184,
+  "peak_retained_kv_bytes": 3482845184,
+  "peak_cuda_allocated_bytes": 28426417664,
+  "peak_cuda_reserved_bytes": 59959672832,
+  "cuda_allocated_after_model_load_bytes": 14192935936,
+  "experiment": "convbench-elastic-r0.4",
+  "method": "elastic",
+  "ratio": 0.4,
+  "overall_mean_nll": 1.359375,
+  "overall_ppl": 3.890625,
+  "device": "cuda"
+}

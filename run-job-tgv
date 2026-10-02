@@ -1,0 +1,142 @@
+#!/bin/bash
+
+#SBATCH --time=24:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+# SBATCH --nodelist=nova21-gpu-2
+#SBATCH --partition=nova
+#SBATCH --job-name="tgv-kv"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_13b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+#python run_alpha_beta_sweep.py
+
+# python3 convert_rouge_qwen.py \
+#  	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#  	--data-path ./mm-vet/mm-vet.json \
+#  	--image-path ./mm-vet/images
+
+# python3 v2-eval-rouge.py \
+# 	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/Qwen-VL \
+#     --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/playground/data/mm-vet/rouge-Qwen-VL-mm-vet.json \
+# 	--image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+# 	--eval-samples 218 \
+# 	--method "elastic" \
+#     --ratio 0.4 \
+#     --exp-name "test-llava-7b-rouge"
+
+#python3 eval_generate.py \
+#	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+ # 	--data-path ./mm-vet/mm-vet.json \
+ # 	--image-path ./mm-vet/images
+#	--method "elastic" \
+ # 	--ratio 0.2
+
+#python eval_ppl.py --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#                    --data-path ./mm-vet/mm-vet.json \
+#    	            --image-path ./mm-vet/images \
+#                     --eval-samples 218 \
+#                    --method "elastic" \
+#	                --ratio 0.4 \
+#	                --exp-name "test1"
+
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./ConvBench/convbench.json \
+#     --image-path ./ConvBench/visit_bench_images \
+#     --eval-samples 3 \
+#     --method elastic --ratio 0.4 \
+#     --exp-name convbench_smoke_elastic
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./ConvBench/convbench.json \
+#     --image-path ./ConvBench/visit_bench_images \
+#     --eval-samples 3 \
+#     --method segregated --ratio 0.4 \
+#     --exp-name convbench_smoke_segregated 
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./ConvBench/convbench.json \
+#     --image-path ./ConvBench/visit_bench_images \
+#     --eval-samples 250 --debug \
+#     --method multimodal_elastic --ratio 0.4 \
+#     --exp-name convbench_smoke_chatgpt_mmelastic
+
+
+# python eval_ppl.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --eval-samples 577 \
+#   --method elastic \
+#   --ratio 0.4 \
+#   --device cuda \
+#   --collect-metrics \
+#   --exp-name convbench-elastic-r0.4
+
+# python eval_ppl_nova_similarity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method tgv_kv \
+#   --ratio 0.2 \
+#   --eval-samples 577 \
+#   --exp-name convbench-tgv-kv-r0.2_13 \
+#   --device cuda 
+
+# python eval_ppl_nova_similarity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method tgv_kv \
+#   --ratio 0.4 \
+#   --eval-samples 577 \
+#   --exp-name convbench-tgv-kv-r0.4_13 \
+#   --device cuda 
+
+
+# python eval_ppl_nova_similarity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method tgv_kv \
+#   --ratio 0.5 \
+#   --eval-samples 577 \
+#   --exp-name convbench-tgv-kv-r0.5_13 \
+#   --device cuda 
+
+# python eval_ppl_nova_similarity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method tgv_kv \
+#   --ratio 0.6 \
+#   --eval-samples 577 \
+#   --exp-name convbench-tgv-kv-r0.6_13 \
+#   --device cuda 
+
+python eval_ppl_nova_similarity.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --method tgv_kv \
+  --ratio 0.8 \
+  --eval-samples 577 \
+  --exp-name convbench-tgv-kv-r0.8_13 \
+  --device cuda 
+
+
+

@@ -1,0 +1,243 @@
+#!/bin/bash
+
+#SBATCH --time=48:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+# SBATCH --nodelist=nova21-gpu-8
+#SBATCH --partition=nova
+#SBATCH --job-name="evi13"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_13b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+#python run_alpha_beta_sweep.py
+
+# python3 convert_rouge_qwen.py \
+#  	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#  	--data-path ./mm-vet/mm-vet.json \
+#  	--image-path ./mm-vet/images
+
+# python3 v2-eval-rouge.py \
+# 	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/Qwen-VL \
+#     --data-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/playground/data/mm-vet/rouge-Qwen-VL-mm-vet.json \
+# 	--image-path /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/mm-vet/images \
+# 	--eval-samples 218 \
+# 	--method "elastic" \
+#     --ratio 0.4 \
+#     --exp-name "test-llava-7b-rouge"
+
+#python3 eval_generate.py \
+#	--model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+ # 	--data-path ./mm-vet/mm-vet.json \
+ # 	--image-path ./mm-vet/images
+#	--method "elastic" \
+ # 	--ratio 0.2
+
+#python eval_ppl.py --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#                    --data-path ./mm-vet/mm-vet.json \
+#    	            --image-path ./mm-vet/images \
+#                     --eval-samples 218 \
+#                    --method "elastic" \
+#	                --ratio 0.4 \
+#	                --exp-name "test1"
+
+#python eval_ppl.py \
+#    --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#    --data-path ./mm-vet/mm-vet.json \
+#    --image-path ./mm-vet/images \
+#    --eval-samples 3 \
+#    --method "multimodal_helastic_seg" \
+#    --segregate-merge \
+#    --conn-weight 0.8 \
+#    --ratio 0.4 \
+#    --exp-name "seg_diag2"
+
+# python eval_ppl.py  \
+#        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#    --data-path ./mm-vet/mm-vet.json \
+#    --image-path ./mm-vet/images \
+#    --method multimodal_helastic --conn-weight 0.0 --ratio 0.4 --eval-samples 218 --exp-name "baseline_test"
+
+# python eval_ppl.py  \
+#        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#    --data-path ./mm-vet/mm-vet.json \
+#    --image-path ./mm-vet/images \
+#    --method elastic --conn-weight 0.8 --ratio 0.4 --eval-samples 3 --exp-name "elastic_test"
+
+# python eval_ppl.py  \
+#        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#    --data-path ./mm-vet/mm-vet.json \
+#    --image-path ./mm-vet/images \
+#    --method h2o --conn-weight 0.8 --ratio 0.4 --eval-samples 3 --exp-name "h2o_test"
+
+
+# python eval_ppl.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./mm-vet/mm-vet.json \
+#     --image-path ./mm-vet/images \
+#     --method multimodal_helastic_seg --segregate-merge --conn-weight 0.8 --ratio 0.4 --eval-samples 218 --exp-name "seg_final"
+
+# python eval_ppl_nova_local_cosine.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method tgv_kv \
+#   --ratio 0.4 \
+#   --beta 0.8 \
+#   --local-window 16 \
+#   --eval-samples 5 \
+#   --exp-name tgv-kv_w16_r04_n5 \
+#   --device cuda
+
+# for method in delayed_first_compression_similarity delayed_first_compression_local_cosine; do
+#   python eval_latency_multiturn_cosine.py \
+#     --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+#     --data-path ./ConvBench/convbench.json \
+#     --image-path ./ConvBench/visit_bench_images \
+#     --method "$method" \
+#     --ratio 0.4 \
+#     --beta 0.8 \
+#     --local-window 32 \
+#     --eval-samples 5 \
+#     --exp-name "latency_${method}_r04_n5" \
+#     --device cuda
+# done
+
+# python eval_ppl_turn_conditioned_layerwise.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#    --data-path ./ConvBench/convbench.json \
+#    --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise \
+#   --ratio 0.4 \
+#   --cross-turn-weight 1.0 \
+#   --eval-samples 100 \
+#    --exp-name turn_conditioned_layerwise_r04_n100 \
+#    --device cuda
+
+# python eval_ppl_turn_conditioned_layerwise.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#    --data-path ./ConvBench/convbench.json \
+#    --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise \
+#   --ratio 0.6 \
+#   --cross-turn-weight 1.0 \
+#   --eval-samples 100 \
+#    --exp-name turn_conditioned_layerwise_r06_n100 \
+#    --device cuda
+
+# python eval_ppl_turn_conditioned_layerwise.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#    --data-path ./ConvBench/convbench.json \
+#    --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise \
+#   --ratio 0.8 \
+#   --cross-turn-weight 1.0 \
+#   --eval-samples 100 \
+#    --exp-name turn_conditioned_layerwise_r08_n100 \
+#   --device cuda
+
+# python eval_ppl_nova_similarity_eviction.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method tgv_kv \
+#   --ratio 0.2 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --exp-name test_tgv_kv_r02_n100
+
+# python eval_ppl_nova_similarity_eviction.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method tgv_kv \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --exp-name test_tgv_kv_r05_n100
+
+# python eval_ppl_nova_similarity_eviction.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method tgv_kv \
+#   --ratio 0.8 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --exp-name test_tgv_kv_r08_n100
+
+python eval_ppl_final.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --device cuda \
+  --method turn_conditioned_layerwise_eviction \
+  --ratio 0.2 \
+  --alpha 1.0 \
+  --beta 0.8 \
+  --eval-samples 577 \
+  --exp-name test_evict_r02_n577_13b
+
+python eval_ppl_final.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --device cuda \
+  --method turn_conditioned_layerwise_eviction \
+  --ratio 0.4 \
+  --alpha 1.0 \
+  --beta 0.8 \
+  --eval-samples 577 \
+  --exp-name test_evict_r04_n577_13b
+
+python eval_ppl_final.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --device cuda \
+  --method turn_conditioned_layerwise_eviction \
+  --ratio 0.5 \
+  --alpha 1.0 \
+  --beta 0.8 \
+  --eval-samples 577 \
+  --exp-name test_evict_r05_n577_13b
+
+python eval_ppl_final.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --device cuda \
+  --method turn_conditioned_layerwise_eviction \
+  --ratio 0.6 \
+  --alpha 1.0 \
+  --beta 0.8 \
+  --eval-samples 577 \
+  --exp-name test_evict_r06_n577_13b
+
+python eval_ppl_final.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --device cuda \
+  --method turn_conditioned_layerwise_eviction \
+  --ratio 0.8 \
+  --alpha 1.0 \
+  --beta 0.8 \
+  --eval-samples 577 \
+  --exp-name test_evict_r08_n577_13b

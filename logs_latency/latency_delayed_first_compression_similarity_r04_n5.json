@@ -1,0 +1,153 @@
+{
+  "experiment": "latency_delayed_first_compression_similarity_r04_n5",
+  "method": "delayed_first_compression_similarity",
+  "ratio": 0.4,
+  "beta": 0.8,
+  "local_window": null,
+  "requested_eval_samples": 5,
+  "evaluated_items": 5,
+  "total_turn_latency_sec": 205.01379554718733,
+  "per_turn": {
+    "1": {
+      "count": 5,
+      "avg_latency_sec": 11.937180372327566,
+      "avg_finalize_sec": 0.9487773983739316,
+      "avg_other_turn_work_sec": 10.988402973953635
+    },
+    "2": {
+      "count": 5,
+      "avg_latency_sec": 15.344120418280363,
+      "avg_finalize_sec": 1.8775276839733123e-05,
+      "avg_other_turn_work_sec": 15.344101643003523
+    },
+    "3": {
+      "count": 5,
+      "avg_latency_sec": 13.721458318829537,
+      "avg_finalize_sec": 1.9310228526592255e-05,
+      "avg_other_turn_work_sec": 13.72143900860101
+    }
+  },
+  "per_item_turn": [
+    {
+      "item": 0,
+      "turn": 1,
+      "answer_tokens": 76,
+      "turn_latency_sec": 24.904598193243146,
+      "finalize_sec": 4.422412846703082,
+      "other_turn_work_sec": 20.482185346540064
+    },
+    {
+      "item": 0,
+      "turn": 2,
+      "answer_tokens": 238,
+      "turn_latency_sec": 16.20206637494266,
+      "finalize_sec": 1.806439831852913e-05,
+      "other_turn_work_sec": 16.202048310544342
+    },
+    {
+      "item": 0,
+      "turn": 3,
+      "answer_tokens": 104,
+      "turn_latency_sec": 8.175169309601188,
+      "finalize_sec": 1.8805265426635742e-05,
+      "other_turn_work_sec": 8.175150504335761
+    },
+    {
+      "item": 1,
+      "turn": 1,
+      "answer_tokens": 76,
+      "turn_latency_sec": 3.117458882275969,
+      "finalize_sec": 0.07301204418763518,
+      "other_turn_work_sec": 3.0444468380883336
+    },
+    {
+      "item": 1,
+      "turn": 2,
+      "answer_tokens": 208,
+      "turn_latency_sec": 13.94198217522353,
+      "finalize_sec": 1.967698335647583e-05,
+      "other_turn_work_sec": 13.941962498240173
+    },
+    {
+      "item": 1,
+      "turn": 3,
+      "answer_tokens": 56,
+      "turn_latency_sec": 5.528417649678886,
+      "finalize_sec": 1.7363112419843674e-05,
+      "other_turn_work_sec": 5.528400286566466
+    },
+    {
+      "item": 2,
+      "turn": 1,
+      "answer_tokens": 96,
+      "turn_latency_sec": 3.8868064051494002,
+      "finalize_sec": 0.07378441886976361,
+      "other_turn_work_sec": 3.8130219862796366
+    },
+    {
+      "item": 2,
+      "turn": 2,
+      "answer_tokens": 279,
+      "turn_latency_sec": 17.555886892601848,
+      "finalize_sec": 1.8685124814510345e-05,
+      "other_turn_work_sec": 17.555868207477033
+    },
+    {
+      "item": 2,
+      "turn": 3,
+      "answer_tokens": 120,
+      "turn_latency_sec": 8.482300456147641,
+      "finalize_sec": 1.7622951418161392e-05,
+      "other_turn_work_sec": 8.482282833196223
+    },
+    {
+      "item": 3,
+      "turn": 1,
+      "answer_tokens": 398,
+      "turn_latency_sec": 15.35205081384629,
+      "finalize_sec": 0.09054871322587132,
+      "other_turn_work_sec": 15.261502100620419
+    },
+    {
+      "item": 3,
+      "turn": 2,
+      "answer_tokens": 260,
+      "turn_latency_sec": 16.3991811866872,
+      "finalize_sec": 2.004764974117279e-05,
+      "other_turn_work_sec": 16.39916113903746
+    },
+    {
+      "item": 3,
+      "turn": 3,
+      "answer_tokens": 655,
+      "turn_latency_sec": 41.47464606305584,
+      "finalize_sec": 1.9014813005924225e-05,
+      "other_turn_work_sec": 41.47462704824284
+    },
+    {
+      "item": 4,
+      "turn": 1,
+      "answer_tokens": 321,
+      "turn_latency_sec": 12.424987567123026,
+      "finalize_sec": 0.08412896888330579,
+      "other_turn_work_sec": 12.34085859823972
+    },
+    {
+      "item": 4,
+      "turn": 2,
+      "answer_tokens": 186,
+      "turn_latency_sec": 12.621485461946577,
+      "finalize_sec": 1.7402227967977524e-05,
+      "other_turn_work_sec": 12.621468059718609
+    },
+    {
+      "item": 4,
+      "turn": 3,
+      "answer_tokens": 57,
+      "turn_latency_sec": 4.9467581156641245,
+      "finalize_sec": 2.374500036239624e-05,
+      "other_turn_work_sec": 4.946734370663762
+    }
+  ],
+  "measurement": "synchronized CUDA wall clock; image load/preprocessing and model loading excluded; prompt tokenization included; first run may include warmup overhead"
+}

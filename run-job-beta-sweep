@@ -1,0 +1,54 @@
+#!/bin/bash
+
+#SBATCH --time=24:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1   # 9 processor core(s) per node
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+# SBATCH --nodelist=nova21-gpu-2
+#SBATCH --partition=nova
+#SBATCH --job-name="similarity"
+#SBATCH --mail-user=tmahmud@iastate.edu   # email address
+#SBATCH --mail-type=BEGIN
+#SBATCH --mail-type=END
+#SBATCH --mail-type=FAIL
+#SBATCH --error="%j-error"
+#SBATCH --output="eval_ppl_llava_13b.out"
+# SBATCH --account=jannesar-lab 
+
+#source ../venv_qwen/bin/activate
+#source /lustre/hdd/LAS/jannesar-lab/tmahmud/ElasticCache/venv_qwen/bin/activate
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+#python run_alpha_beta_sweep.py
+summary="beta_sweep_results.txt"
+echo "ratio:beta:ppl" > "$summary"
+
+for beta in 0.0 0.2 0.4 0.6 0.8 1.0; do
+    echo "Running beta=$beta"
+
+    python eval_ppl_nova_similarity.py \
+        --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-13b \
+        --data-path ./ConvBench/convbench.json \
+        --image-path ./ConvBench/visit_bench_images \
+        --method delayed_first_compression_similarity \
+        --ratio 0.6 \
+        --alpha 1.0 \
+        --beta "$beta" \
+        --eval-samples 50 \
+        --exp-name "beta_${beta}_r06_n50" \
+        --device cuda
+done
+
+python - "$beta" <<'PY' >> "$summary"
+import json
+import sys
+
+beta = sys.argv[1]
+path = f"logs_ppl_llava/beta_{beta}_r04_n5.json"
+
+with open(path) as f:
+    result = json.load(f)
+
+print(f"{result['ratio']}:{beta}:{result['overall_ppl']:.6f}")
+PY
