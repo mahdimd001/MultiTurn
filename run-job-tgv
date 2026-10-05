@@ -135,7 +135,7 @@ python eval_ppl_nova_similarity.py \
   --method tgv_kv \
   --ratio 0.8 \
   --eval-samples 577 \
-  --exp-name convbench-tgv-kv-r0.8_13 \
+  --exp-name convbench-tgv-kv-r0.8_n577_7B \
   --device cuda 
 
 
