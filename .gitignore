@@ -32,3 +32,5 @@ ecache/
 # Misc
 .DS_Store
 venv_qwen/
+path/to/dir/
+ConvBench
