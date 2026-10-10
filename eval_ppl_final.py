@@ -24,16 +24,14 @@ Only the first turn sends the image to LLaVA.  Later turns send ONLY the newly
 appended text tokens.  Previous questions/answers are already represented by
 past_key_values and are therefore never fed a second time.
 
-The exposed methods are the final merge/eviction design and four baselines:
-TGV-KV, LocalCache, H2O, and ElasticCache.
+The evaluator exposes the turn-boundary merge/eviction variants and the TGV-KV,
+LocalCache, H2O, and ElasticCache comparison baselines.
 """
 
 import argparse
 import json
 import os
-from io import BytesIO
 
-import requests
 import torch
 from PIL import Image
 from torch.nn import CrossEntropyLoss
@@ -61,12 +59,7 @@ from llava.mm_utils import (
 from llava.model.builder import load_pretrained_model
 
 def load_image(image_file):
-    """Load a local image or an image URL and always return RGB."""
-    if image_file.startswith("http://") or image_file.startswith("https://"):
-        response = requests.get(image_file, timeout=30)
-        response.raise_for_status()
-        return Image.open(BytesIO(response.content)).convert("RGB")
-
+    """Load a local image and return RGB."""
     return Image.open(image_file).convert("RGB")
 
 
@@ -162,13 +155,58 @@ def infer_actual_image_span(input_ids, past_key_values, k_seq_dim=2):
     return image_start, image_token_len
 
 
-def common_prefix_length(a, b):
-    """Return the identical leading-token count of two [1, N] tensors."""
-    length = min(a.shape[1], b.shape[1])
-    if length == 0:
-        return 0
-    mismatch = (a[:, :length] != b[:, :length]).nonzero(as_tuple=False)
-    return int(mismatch[0, 1].item()) if mismatch.numel() else length
+def load_sensitivity_profile(path, mode, expected_layers, evaluation_ratio):
+    """Load only the layer-sensitivity fields required by ``mode``."""
+    if not path:
+        raise ValueError(
+            "--sensitivity-profile is required when --allocation-signal "
+            "sensitivity is selected"
+        )
+    with open(path, "r") as handle:
+        profile = json.load(handle)
+
+    declared_layers = profile.get("layer_num")
+    if declared_layers is not None and int(declared_layers) != expected_layers:
+        raise ValueError(
+            f"Sensitivity profile declares {declared_layers} layers; "
+            f"this model expects {expected_layers}"
+        )
+
+    required = {
+        "joint": ("joint",),
+        "image": ("image",),
+        "text": ("text",),
+        "split": ("image", "text"),
+    }[mode]
+    validated = {"joint": None, "image": None, "text": None}
+    for name in required:
+        values = torch.as_tensor(profile.get(name, []), dtype=torch.float32).flatten()
+        if values.numel() != expected_layers:
+            raise ValueError(
+                f"Sensitivity profile '{name}' has {values.numel()} values; "
+                f"expected {expected_layers}"
+            )
+        if not torch.isfinite(values).all() or (values < 0).any():
+            raise ValueError(
+                f"Sensitivity profile '{name}' must contain finite, "
+                "non-negative values"
+            )
+        validated[name] = values.tolist()
+
+    probe_ratio = profile.get("probe_ratio")
+    if probe_ratio is None:
+        print(
+            "[WARNING] sensitivity profile has no probe_ratio metadata; "
+            "cannot verify that calibration and evaluation ratios match."
+        )
+    elif abs(float(probe_ratio) - float(evaluation_ratio)) > 1e-8:
+        raise ValueError(
+            f"Sensitivity profile was calibrated at ratio {probe_ratio}, but "
+            f"evaluation requested ratio {evaluation_ratio}. Recalibrate at "
+            "the evaluation ratio."
+        )
+
+    return validated, profile
 
 
 def build_cache(
@@ -176,20 +214,19 @@ def build_cache(
     model_name,
     image_start=None,
     image_token_len=0,
-    initial_protected_text_len=0,
 ):
     """Create a fresh cache object for one dataset item/conversation."""
     layer_num = 32 if "7b" in model_name.lower() else 40
     common = dict(
         start_size=args.start_size,
-        recent_size=args.recent_size,
         k_seq_dim=2,
         v_seq_dim=2,
         ratio=args.ratio,
     )
+    baseline_common = dict(common, recent_size=args.recent_size)
 
     if args.method == "elastic_cache":
-        return ElasticCache(layer_num=layer_num, **common)
+        return ElasticCache(layer_num=layer_num, **baseline_common)
 
     if args.method == "turn_conditioned_layerwise_merge":
         return TurnConditionedLayerwiseKVCache(
@@ -199,6 +236,12 @@ def build_cache(
             attn_weight=args.alpha,
             conn_weight=args.beta,
             cross_turn_weight=args.cross_turn_weight,
+            allocation_signal=args.allocation_signal,
+            sensitivity_mode=args.sensitivity_mode,
+            sensitivity_joint=args.sensitivity_joint,
+            sensitivity_image=args.sensitivity_image,
+            sensitivity_text=args.sensitivity_text,
+            sensitivity_power=args.sens_alpha,
             **common,
         )
 
@@ -210,6 +253,12 @@ def build_cache(
             attn_weight=args.alpha,
             conn_weight=args.beta,
             cross_turn_weight=args.cross_turn_weight,
+            allocation_signal=args.allocation_signal,
+            sensitivity_mode=args.sensitivity_mode,
+            sensitivity_joint=args.sensitivity_joint,
+            sensitivity_image=args.sensitivity_image,
+            sensitivity_text=args.sensitivity_text,
+            sensitivity_power=args.sens_alpha,
             **common,
         )
 
@@ -225,10 +274,10 @@ def build_cache(
         )
 
     if args.method == "local_cache":
-        return LocalCache(**common)
+        return LocalCache(**baseline_common)
 
     if args.method == "h2o":
-        return H2OCache(**common)
+        return H2OCache(**baseline_common)
 
     raise ValueError(f"Invalid method: {args.method}")
 
@@ -288,14 +337,9 @@ def forward_one_text_token(model, token_ids, past_key_values, kv_cache, num_of_t
         device=token_ids.device,
     )
 
-    # TGV-KV can assign different physical cache lengths to different layers.
-    # Its legacy attention compatibility path therefore needs the logical RoPE
-    # limit explicitly for every appended token. Other methods continue using
-    # the normal Nova/Transformers RoPE patch already installed in the env.
-    if isinstance(
-        kv_cache,
-        (TGVKVCache, TurnConditionedLayerwiseKVCache),
-    ):
+    # Nonuniform layer budgets need an explicit logical RoPE limit because
+    # physical layer lengths no longer equal the logical conversation length.
+    if isinstance(kv_cache, (TGVKVCache, TurnConditionedLayerwiseKVCache)):
         set_legacy_logical_position_limit(model, num_of_token + 1)
 
     outputs = model(
@@ -398,17 +442,11 @@ def choose_conversation_mode(model_name, requested_mode):
 
 
 def main(args):
-    # ----------------------------
-    # Load dataset and LLaVA model
-    # ----------------------------
-    # TGV-KV reallocates the visual budget across layers, so layers can have
-    # unequal physical KV lengths. Transformers 4.31 assumes equal lengths;
-    # enable the compatibility attention implementation only for this method.
-    if args.method in {
-        "tgv_kv",
+    turn_conditioned_methods = {
         "turn_conditioned_layerwise_merge",
         "turn_conditioned_layerwise_eviction",
-    }:
+    }
+    if args.method in turn_conditioned_methods | {"tgv_kv"}:
         enable_legacy_tgv_attention()
 
     # Nova/GPU path: keep device handling simple and explicit.
@@ -420,10 +458,38 @@ def main(args):
     device = torch.device(args.device)
     print(f"Using device: {device}")
 
+    if args.sens_alpha <= 0:
+        raise ValueError("--sens-alpha must be positive")
+    if args.method not in turn_conditioned_methods and args.allocation_signal != "turn":
+        raise ValueError(
+            "--allocation-signal applies only to the turn-conditioned methods"
+        )
     with open(args.data_path, "r") as f:
         data = json.load(f)
 
     model_name = get_model_name_from_path(args.model_path)
+    expected_layers = 32 if "7b" in model_name.lower() else 40
+    args.sensitivity_joint = None
+    args.sensitivity_image = None
+    args.sensitivity_text = None
+    args.sensitivity_metadata = None
+    if args.allocation_signal == "sensitivity":
+        profiles, args.sensitivity_metadata = load_sensitivity_profile(
+            args.sensitivity_profile,
+            args.sensitivity_mode,
+            expected_layers,
+            args.ratio,
+        )
+        args.sensitivity_joint = profiles["joint"]
+        args.sensitivity_image = profiles["image"]
+        args.sensitivity_text = profiles["text"]
+        print(
+            "Loaded frozen sensitivity allocation profile: "
+            f"{args.sensitivity_profile} (mode={args.sensitivity_mode}, "
+            f"power={args.sens_alpha}). "
+            "--cross-turn-weight is not used by this allocation policy."
+        )
+
     tokenizer, model, image_processor, _ = load_pretrained_model(
         args.model_path,
         args.model_base,
@@ -465,9 +531,6 @@ def main(args):
         # Conversation and cache state belong to this ONE data item.
         # ---------------------------------------------------------
         conv = conv_templates[args.conv_mode].copy()
-        static_ids = tokenize_conversation_prompt(
-            conv.get_prompt(), tokenizer, model.device
-        )
         past_key_values = None
         kv_cache = None
 
@@ -529,10 +592,6 @@ def main(args):
                 image_start, image_token_len = infer_actual_image_span(
                     base_ids, past_key_values, k_seq_dim=2
                 )
-                initial_protected_text_len = common_prefix_length(
-                    base_ids, static_ids
-                )
-
                 # Build the cache only AFTER the first forward pass so that the
                 # multimodal cache receives the true visual-token length.
                 kv_cache = build_cache(
@@ -540,7 +599,6 @@ def main(args):
                     model_name,
                     image_start=image_start,
                     image_token_len=image_token_len,
-                    initial_protected_text_len=initial_protected_text_len,
                 )
 
                 if args.debug:
@@ -549,8 +607,7 @@ def main(args):
                         f"text/input ids={base_ids.shape[1]}, "
                         f"expanded KV={effective_prefill_len}, "
                         f"image_start={image_start}, "
-                        f"image_token_len={image_token_len}, "
-                        f"protected_static_prefix={initial_protected_text_len}"
+                        f"image_token_len={image_token_len}"
                     )
 
                 # Apply pruning/merging to the first multimodal prefill.
@@ -769,6 +826,32 @@ def main(args):
         "per_turn_answer_tokens": per_turn_token_count,
         "alpha": float(args.alpha),
         "beta": float(args.beta),
+        "cross_turn_weight": (
+            float(args.cross_turn_weight)
+            if args.method in turn_conditioned_methods
+            and args.allocation_signal == "turn"
+            else None
+        ),
+        "allocation_signal": (
+            args.allocation_signal
+            if args.method in turn_conditioned_methods
+            else None
+        ),
+        "sensitivity_mode": (
+            args.sensitivity_mode
+            if args.allocation_signal == "sensitivity"
+            else None
+        ),
+        "sensitivity_profile": (
+            args.sensitivity_profile
+            if args.allocation_signal == "sensitivity"
+            else None
+        ),
+        "sens_alpha": (
+            float(args.sens_alpha)
+            if args.allocation_signal == "sensitivity"
+            else None
+        ),
     }
     with open(json_output_path, "w") as f:
         json.dump(result, f, indent=2)
@@ -790,8 +873,6 @@ if __name__ == "__main__":
     parser.add_argument("--image-path", type=str, default="./playground/data/mm-vet/images")
     parser.add_argument("--device", type=str, default="cuda", help="Nova: cuda (default) or cuda:N")
     parser.add_argument("--conv-mode", type=str, default=None)
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--image-aspect-ratio", type=str, default="pad")
@@ -804,7 +885,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         type=str,
-        default="turn_conditioned_layerwise_merge",
+        default="turn_conditioned_layerwise_eviction",
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
@@ -823,7 +904,46 @@ if __name__ == "__main__":
         "--cross-turn-weight",
         type=float,
         default=1.0,
-        help="Weight on current-turn attention to prior-turn KV entries.",
+        help=(
+            "Weight on current-turn attention to prior-turn KV entries for "
+            "--allocation-signal turn; ignored for sensitivity allocation."
+        ),
+    )
+    parser.add_argument(
+        "--allocation-signal",
+        choices=["uniform", "turn", "sensitivity"],
+        default="turn",
+        help=(
+            "Layer-budget policy: equal budgets, dynamic grounding/history, "
+            "or a frozen sensitivity profile."
+        ),
+    )
+    parser.add_argument(
+        "--sensitivity-mode",
+        choices=["joint", "image", "text", "split"],
+        default="split",
+        help=(
+            "Profile field used when --allocation-signal sensitivity. Split "
+            "uses image at the first boundary and image+text afterward."
+        ),
+    )
+    parser.add_argument(
+        "--sensitivity-profile",
+        type=str,
+        default=None,
+        help=(
+            "JSON written by calibrate_sensitivity.py or "
+            "calibrate_sensitivity_joint.py."
+        ),
+    )
+    parser.add_argument(
+        "--sens-alpha",
+        type=float,
+        default=1.0,
+        help=(
+            "Exponent applied to calibrated layer sensitivity. This is "
+            "separate from --alpha, the token-attention score weight."
+        ),
     )
 
     # Debug mode prints per-turn token counts and physical KV lengths.  This is

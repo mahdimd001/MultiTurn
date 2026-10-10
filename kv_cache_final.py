@@ -1,13 +1,7 @@
-"""Final KV-cache methods used by ``eval_ppl_final.py``.
-
-The turn-conditioned caches delay their first compression until the end of
-turn 1 and compress only at turn boundaries.  The merge and eviction variants
-share scoring, layer-wise allocation, and retained-token selection.
-"""
+"""Turn-boundary merge and eviction caches used by ``eval_ppl_final.py``."""
 
 import torch
 
-# Re-export the requested comparison baselines from one final cache module.
 from kv_cache_nova_similarity_eviction import ElasticCache, H2OCache, LocalCache
 from tgv_kv_legacy_nova import (
     TGVKVCache,
@@ -17,7 +11,7 @@ from tgv_kv_legacy_nova import (
 
 
 class TurnConditionedLayerwiseKVCache:
-    """Boundary-only KV compression with turn-conditioned layer budgets.
+    """Boundary-only KV compression with selectable layer-budget evidence.
 
     Allocation signal for layer l at the end of turn t:
 
@@ -25,8 +19,11 @@ class TurnConditionedLayerwiseKVCache:
 
     where grounding is attention from current-turn text queries to image keys,
     and history is attention from those queries to keys tagged with an earlier
-    turn id.  Token retention continues to use cumulative incoming attention
-    plus the original text-to-image grounding bonus.
+    turn id. ``allocation_signal="uniform"`` gives every layer equal weight.
+    ``allocation_signal="sensitivity"`` selects a frozen joint, image, text,
+    or split profile. Split mode uses image sensitivity at the first boundary,
+    then averages separately powered image and prior-text sensitivities later.
+    Token retention itself remains unchanged in every allocation ablation.
     """
 
     IMAGE = -1
@@ -34,7 +31,6 @@ class TurnConditionedLayerwiseKVCache:
     def __init__(
         self,
         start_size=4,
-        recent_size=512,
         k_seq_dim=2,
         v_seq_dim=2,
         ratio=0.0,
@@ -44,9 +40,14 @@ class TurnConditionedLayerwiseKVCache:
         cross_turn_weight=1.0,
         image_start=None,
         image_token_len=0,
+        allocation_signal="turn",
+        sensitivity_mode="split",
+        sensitivity_joint=None,
+        sensitivity_image=None,
+        sensitivity_text=None,
+        sensitivity_power=1.0,
     ):
         self.start_size = int(start_size)
-        self.recent_size = int(recent_size)
         self.k_seq_dim = int(k_seq_dim)
         self.v_seq_dim = int(v_seq_dim)
         self.ratio = float(ratio)
@@ -56,8 +57,65 @@ class TurnConditionedLayerwiseKVCache:
         self.cross_turn_weight = float(cross_turn_weight)
         self.image_start = image_start
         self.image_token_len = int(image_token_len)
+        self.allocation_signal = str(allocation_signal)
+        self.sensitivity_mode = str(sensitivity_mode)
+        self.sensitivity_power = float(sensitivity_power)
+
+        if self.allocation_signal not in {"uniform", "turn", "sensitivity"}:
+            raise ValueError(
+                "allocation_signal must be 'uniform', 'turn', or 'sensitivity'"
+            )
+        if self.sensitivity_mode not in {"joint", "image", "text", "split"}:
+            raise ValueError(
+                "sensitivity_mode must be 'joint', 'image', 'text', or 'split'"
+            )
+        if self.sensitivity_power <= 0:
+            raise ValueError("sensitivity_power must be positive")
+
+        self.sensitivity_joint = self._validate_sensitivity_profile(
+            sensitivity_joint, "joint"
+        )
+        self.sensitivity_image = self._validate_sensitivity_profile(
+            sensitivity_image, "image"
+        )
+        self.sensitivity_text = self._validate_sensitivity_profile(
+            sensitivity_text, "text"
+        )
+        if self.allocation_signal == "sensitivity":
+            required = {
+                "joint": (("joint", self.sensitivity_joint),),
+                "image": (("image", self.sensitivity_image),),
+                "text": (("text", self.sensitivity_text),),
+                "split": (
+                    ("image", self.sensitivity_image),
+                    ("text", self.sensitivity_text),
+                ),
+            }[self.sensitivity_mode]
+            missing = [name for name, values in required if values is None]
+            if missing:
+                raise ValueError(
+                    "Sensitivity mode '{}' requires profile field(s): {}".format(
+                        self.sensitivity_mode, ", ".join(missing)
+                    )
+                )
         self.protect_size = 1
         self.reset()
+
+    def _validate_sensitivity_profile(self, values, name):
+        """Validate one frozen scalar-per-layer calibration profile."""
+        if values is None:
+            return None
+        tensor = torch.as_tensor(values, dtype=torch.float32).flatten().cpu()
+        if tensor.numel() != self.layer_num:
+            raise ValueError(
+                f"{name} sensitivity has {tensor.numel()} values; "
+                f"expected {self.layer_num}"
+            )
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{name} sensitivity contains NaN or infinity")
+        if (tensor < 0).any():
+            raise ValueError(f"{name} sensitivity must be non-negative")
+        return tuple(float(x) for x in tensor.tolist())
 
     def reset(self):
         self.score_sum = None
@@ -181,6 +239,34 @@ class TurnConditionedLayerwiseKVCache:
         return result
 
     def _allocation_scores(self):
+        if self.allocation_signal == "uniform":
+            return torch.ones_like(self.grounding_sum)
+
+        if self.allocation_signal == "sensitivity":
+            device = self.grounding_sum.device
+
+            def powered(values):
+                return torch.tensor(
+                    values, dtype=torch.float32, device=device
+                ).clamp_min(0.0).pow(self.sensitivity_power)
+
+            if self.sensitivity_mode == "joint":
+                weights = powered(self.sensitivity_joint)
+            elif self.sensitivity_mode == "image":
+                weights = powered(self.sensitivity_image)
+            elif self.sensitivity_mode == "text":
+                weights = powered(self.sensitivity_text)
+            else:
+                image_weights = powered(self.sensitivity_image)
+                if self.current_turn == 0:
+                    weights = image_weights
+                else:
+                    text_weights = powered(self.sensitivity_text)
+                    weights = 0.5 * (image_weights + text_weights)
+
+            # A completely flat-zero profile contains no allocation evidence.
+            return torch.ones_like(weights) if weights.sum() <= 0 else weights
+
         denom = self.query_count.clamp_min(1.0)
         grounding = self.grounding_sum / denom
         history = self.history_sum / denom
@@ -286,18 +372,56 @@ class TurnConditionedLayerwiseKVCache:
         merged = tensor.scatter_reduce(seq_dim, index, forgotten, reduce="mean")
         return merged.index_select(seq_dim, retained.to(tensor.device))
 
+    def _turn_budgets(self):
+        scores = self._allocation_scores()
+        lengths = torch.tensor(
+            [x.numel() for x in self.score_sum], device=scores.device
+        )
+        uniform_target = max(
+            1, int(self.latest_logical_len * (1.0 - self.ratio))
+        )
+        lower = torch.tensor(
+            [
+                min(int(length), self.start_size + self.protect_size)
+                for length in lengths.tolist()
+            ],
+            device=scores.device,
+        )
+        budgets = self._bounded_largest_remainder(
+            uniform_target * self.layer_num,
+            scores,
+            lower,
+            lengths,
+        )
+        return scores, budgets, uniform_target
+
+    def _finish_finalize(self, scores, budgets, uniform_target, policy):
+        self.last_layer_scores = scores.detach().cpu().tolist()
+        self.last_layer_budgets = budgets.detach().cpu().tolist()
+        self.last_finalize_stats = {
+            "turn": self.current_turn + 1,
+            "allocation_signal": self.allocation_signal,
+            "sensitivity_mode": (
+                self.sensitivity_mode
+                if self.allocation_signal == "sensitivity"
+                else None
+            ),
+            "sensitivity_power": (
+                self.sensitivity_power
+                if self.allocation_signal == "sensitivity"
+                else None
+            ),
+            "global_budget": int(sum(self.last_layer_budgets)),
+            "uniform_target_per_layer": uniform_target,
+            "layer_scores": self.last_layer_scores,
+            "layer_budgets": self.last_layer_budgets,
+            "dropped_token_policy": policy,
+        }
+
     def finalize_turn(self, past_key_values):
         if past_key_values is None or self.score_sum is None:
             return past_key_values
-        scores = self._allocation_scores()
-        lengths = torch.tensor([x.numel() for x in self.score_sum], device=scores.device)
-        uniform_target = max(1, int(self.latest_logical_len * (1.0 - self.ratio)))
-        global_budget = uniform_target * self.layer_num
-        lower = torch.tensor(
-            [min(int(n), self.start_size + self.protect_size) for n in lengths.tolist()],
-            device=scores.device,
-        )
-        budgets = self._bounded_largest_remainder(global_budget, scores, lower, lengths)
+        scores, budgets, uniform_target = self._turn_budgets()
 
         new_past, new_score, new_conn, new_provenance = [], [], [], []
         for layer_idx, (k, v) in enumerate(past_key_values):
@@ -319,15 +443,7 @@ class TurnConditionedLayerwiseKVCache:
 
         self.score_sum, self.conn_score_sum = new_score, new_conn
         self.provenance = new_provenance
-        self.last_layer_scores = scores.detach().cpu().tolist()
-        self.last_layer_budgets = budgets.detach().cpu().tolist()
-        self.last_finalize_stats = {
-            "turn": self.current_turn + 1,
-            "global_budget": int(sum(self.last_layer_budgets)),
-            "uniform_target_per_layer": uniform_target,
-            "layer_scores": self.last_layer_scores,
-            "layer_budgets": self.last_layer_budgets,
-        }
+        self._finish_finalize(scores, budgets, uniform_target, "merge")
         return new_past
 
 
@@ -344,29 +460,7 @@ class TurnConditionedLayerwiseEvictionKVCache(TurnConditionedLayerwiseKVCache):
         if past_key_values is None or self.score_sum is None:
             return past_key_values
 
-        scores = self._allocation_scores()
-        lengths = torch.tensor(
-            [x.numel() for x in self.score_sum],
-            device=scores.device,
-        )
-        uniform_target = max(
-            1,
-            int(self.latest_logical_len * (1.0 - self.ratio)),
-        )
-        global_budget = uniform_target * self.layer_num
-        lower = torch.tensor(
-            [
-                min(int(n), self.start_size + self.protect_size)
-                for n in lengths.tolist()
-            ],
-            device=scores.device,
-        )
-        budgets = self._bounded_largest_remainder(
-            global_budget,
-            scores,
-            lower,
-            lengths,
-        )
+        scores, budgets, uniform_target = self._turn_budgets()
 
         new_past, new_score, new_conn, new_provenance = [], [], [], []
         for layer_idx, (k, v) in enumerate(past_key_values):
@@ -384,14 +478,5 @@ class TurnConditionedLayerwiseEvictionKVCache(TurnConditionedLayerwiseKVCache):
 
         self.score_sum, self.conn_score_sum = new_score, new_conn
         self.provenance = new_provenance
-        self.last_layer_scores = scores.detach().cpu().tolist()
-        self.last_layer_budgets = budgets.detach().cpu().tolist()
-        self.last_finalize_stats = {
-            "turn": self.current_turn + 1,
-            "global_budget": int(sum(self.last_layer_budgets)),
-            "uniform_target_per_layer": uniform_target,
-            "layer_scores": self.last_layer_scores,
-            "layer_budgets": self.last_layer_budgets,
-            "dropped_token_policy": "evict",
-        }
+        self._finish_finalize(scores, budgets, uniform_target, "evict")
         return new_past

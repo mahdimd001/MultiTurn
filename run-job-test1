@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:a100:1
 # SBATCH --nodelist=nova21-gpu-8
 #SBATCH --partition=nova
-#SBATCH --job-name="evi7"
+#SBATCH --job-name="test1"
 #SBATCH --mail-user=tmahmud@iastate.edu   # email address
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END
@@ -99,62 +99,314 @@ source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
 #   --exp-name local_cosine_w32_r04_n5 \
 #   --device cuda
 
-python eval_ppl_final.py \
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method turn_conditioned_layerwise_eviction \
+#   --ratio 0.2 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 577 \
+#   --exp-name test_evict_r02_n577
+
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method turn_conditioned_layerwise_eviction \
+#   --ratio 0.4 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 577 \
+#   --exp-name test_evict_r04_n577
+
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method turn_conditioned_layerwise_eviction \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 577 \
+#   --exp-name test_evict_r05_n577
+
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method turn_conditioned_layerwise_eviction \
+#   --ratio 0.6 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 577 \
+#   --exp-name test_evict_r06_n577
+
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --device cuda \
+#   --method turn_conditioned_layerwise_eviction \
+#   --ratio 0.8 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 577 \
+#   --exp-name test_evict_r08_n577
+
+############### 0.8 ratio
+#uniform
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal uniform \
+#   --ratio 0.8 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name uniform_layerwise_r08_100
+
+#image-only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode image \
+#   --sensitivity-profile sensitivity_llava7b_r08.json \
+#   --sens-alpha 1 \
+#   --ratio 0.8 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name image_sensitivity_alpha1_r08_100
+
+#text only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode text \
+#   --sensitivity-profile sensitivity_llava7b_r08.json \
+#   --sens-alpha 1 \
+#   --ratio 0.8 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name text_sensitivity_alpha1_r08_100
+
+##########ratio 0.5
+#uniform
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal uniform \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name uniform_layerwise_r05_100
+
+# python calibrate_sensitivity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --calib-offset 100 \
+#   --calib-samples 16 \
+#   --probe-ratio 0.5 \
+#   --out sensitivity_llava7b_r05.json
+
+# #split
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode split \
+#   --sensitivity-profile sensitivity_llava7b_r05.json \
+#   --sens-alpha 1 \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name split_sensitivity_alpha1_r05_100
+
+#joint
+python calibrate_sensitivity_joint.py \
   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
   --data-path ./ConvBench/convbench.json \
   --image-path ./ConvBench/visit_bench_images \
-  --device cuda \
-  --method turn_conditioned_layerwise_eviction \
-  --ratio 0.2 \
-  --alpha 1.0 \
-  --beta 0.8 \
-  --eval-samples 577 \
-  --exp-name test_evict_r02_n577
+  --calib-offset 100 \
+  --calib-samples 16 \
+  --probe-ratio 0.5 \
+  --out sensitivity_joint_llava7b_r05.json
 
 python eval_ppl_final.py \
   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
   --data-path ./ConvBench/convbench.json \
   --image-path ./ConvBench/visit_bench_images \
-  --device cuda \
   --method turn_conditioned_layerwise_eviction \
-  --ratio 0.4 \
-  --alpha 1.0 \
-  --beta 0.8 \
-  --eval-samples 577 \
-  --exp-name test_evict_r04_n577
-
-python eval_ppl_final.py \
-  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
-  --data-path ./ConvBench/convbench.json \
-  --image-path ./ConvBench/visit_bench_images \
-  --device cuda \
-  --method turn_conditioned_layerwise_eviction \
+  --allocation-signal sensitivity \
+  --sensitivity-mode joint \
+  --sensitivity-profile sensitivity_joint_llava7b_r05.json \
+  --sens-alpha 1 \
   --ratio 0.5 \
   --alpha 1.0 \
   --beta 0.8 \
-  --eval-samples 577 \
-  --exp-name test_evict_r05_n577
+  --eval-samples 100 \
+  --device cuda \
+  --exp-name joint_sensitivity_alpha1_r05_100
 
+#image-only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode image \
+#   --sensitivity-profile sensitivity_llava7b_r05.json \
+#   --sens-alpha 1 \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name image_sensitivity_alpha1_r05_100
+
+#text only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode text \
+#   --sensitivity-profile sensitivity_llava7b_r05.json \
+#   --sens-alpha 1 \
+#   --ratio 0.5 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name text_sensitivity_alpha1_r05_100
+
+##### ratio 0.9
+# python calibrate_sensitivity.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --calib-offset 100 \
+#   --calib-samples 16 \
+#   --probe-ratio 0.9 \
+#   --out sensitivity_llava7b_r09.json
+
+python calibrate_sensitivity_joint.py \
+  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+  --data-path ./ConvBench/convbench.json \
+  --image-path ./ConvBench/visit_bench_images \
+  --calib-offset 100 \
+  --calib-samples 16 \
+  --probe-ratio 0.9 \
+  --out sensitivity_joint_llava7b_r09.json
+
+
+#split
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode split \
+#   --sensitivity-profile sensitivity_llava7b_r09.json \
+#   --sens-alpha 1 \
+#   --ratio 0.9 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name split_sensitivity_alpha1_r09_100
+
+#joint
 python eval_ppl_final.py \
   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
   --data-path ./ConvBench/convbench.json \
   --image-path ./ConvBench/visit_bench_images \
-  --device cuda \
   --method turn_conditioned_layerwise_eviction \
-  --ratio 0.6 \
+  --allocation-signal sensitivity \
+  --sensitivity-mode joint \
+  --sensitivity-profile sensitivity_joint_llava7b_r09.json \
+  --sens-alpha 1 \
+  --ratio 0.9 \
   --alpha 1.0 \
   --beta 0.8 \
-  --eval-samples 577 \
-  --exp-name test_evict_r06_n577
+  --eval-samples 100 \
+  --device cuda \
+  --exp-name joint_sensitivity_alpha1_r09_100
 
-python eval_ppl_final.py \
-  --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
-  --data-path ./ConvBench/convbench.json \
-  --image-path ./ConvBench/visit_bench_images \
-  --device cuda \
-  --method turn_conditioned_layerwise_eviction \
-  --ratio 0.8 \
-  --alpha 1.0 \
-  --beta 0.8 \
-  --eval-samples 577 \
-  --exp-name test_evict_r08_n577
+#image-only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode image \
+#   --sensitivity-profile sensitivity_llava7b_r09.json \
+#   --sens-alpha 1 \
+#   --ratio 0.9 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name image_sensitivity_alpha1_r09_100
+
+#text only
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal sensitivity \
+#   --sensitivity-mode text \
+#   --sensitivity-profile sensitivity_llava7b_r09.json \
+#   --sens-alpha 1 \
+#   --ratio 0.9 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name text_sensitivity_alpha1_r09_100
+
+#uniform
+# python eval_ppl_final.py \
+#   --model-path /lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b \
+#   --data-path ./ConvBench/convbench.json \
+#   --image-path ./ConvBench/visit_bench_images \
+#   --method turn_conditioned_layerwise_eviction \
+#   --allocation-signal uniform \
+#   --ratio 0.9 \
+#   --alpha 1.0 \
+#   --beta 0.8 \
+#   --eval-samples 100 \
+#   --device cuda \
+#   --exp-name uniform_layerwise_r09_100
