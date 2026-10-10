@@ -31,6 +31,10 @@ from kv_cache_final import (
     enable_legacy_tgv_attention,
     set_legacy_logical_position_limit,
 )
+from tgv_kv_legacy_nova import (
+    enable_online_attention,
+    online_attention,
+)
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import SeparatorStyle, conv_templates
 from llava.mm_utils import (
@@ -164,10 +168,14 @@ def build_kv_cache(args, model_name, image_start=None, image_token_len=0):
     layer_num = 32 if "7b" in model_name.lower() else 40
     common = dict(
         start_size=args.start_size,
-        recent_size=args.recent_size,
         k_seq_dim=2,
         v_seq_dim=2,
         ratio=args.ratio,
+    )
+
+    baseline_common = dict(
+        common,
+        recent_size=args.recent_size,
     )
 
     if args.method == "turn_conditioned_layerwise_merge":
@@ -201,11 +209,16 @@ def build_kv_cache(args, model_name, image_start=None, image_token_len=0):
             ratio=args.ratio,
         )
     if args.method == "local_cache":
-        return LocalCache(**common)
+        return LocalCache(**baseline_common)
+
     if args.method == "h2o":
-        return H2OCache(**common)
+        return H2OCache(**baseline_common)
+
     if args.method == "elastic_cache":
-        return ElasticCache(layer_num=layer_num, **common)
+        return ElasticCache(
+            layer_num=layer_num,
+            **baseline_common,
+        )
     raise ValueError(f"Invalid method: {args.method}")
 
 
@@ -216,6 +229,19 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
         attentions=attentions,
     )
 
+def prefill_reads_attention(kv_cache):
+    """Whether the selected cache consumes initial-prefill attention."""
+    return not isinstance(kv_cache, LocalCache)
+
+
+def decode_reads_attention(kv_cache):
+    """Whether the selected cache consumes one-token continuation attention."""
+    # LocalCache never reads attention.
+    # ElasticCache only scores the initial prefill.
+    return not isinstance(
+        kv_cache,
+        (LocalCache, ElasticCache),
+    )
 
 def finalize_turn_cache(kv_cache, past_key_values):
     """Run delayed boundary compression, then advance text provenance."""
@@ -234,15 +260,19 @@ def forward_one_token(model, token_ids, past_key_values, kv_cache, logical_len):
     position_ids = torch.tensor(
         [[logical_len]], dtype=torch.long, device=token_ids.device
     )
-    if isinstance(kv_cache, (TGVKVCache, TurnConditionedLayerwiseKVCache)):
-        set_legacy_logical_position_limit(model, logical_len + 1)
+    # KV compression makes the physical cache shorter than the original
+    # conversation. Size the RoPE table using the original logical position.
+    set_legacy_logical_position_limit(
+        model,
+        logical_len + 1,
+    )
 
     outputs = model(
         input_ids=token_ids,
         position_ids=position_ids,
         past_key_values=past_key_values,
         use_cache=True,
-        output_attentions=True,
+        output_attentions=decode_reads_attention(kv_cache),
     )
     logical_len += outputs.logits.shape[1]
     past_key_values = apply_cache(
@@ -405,12 +435,9 @@ def generate_one_turn(
 def main(args):
     if args.num_beams != 1:
         raise ValueError("This continuous-cache evaluator currently supports --num-beams 1 only.")
-    if args.method in {
-        "tgv_kv",
-        "turn_conditioned_layerwise_merge",
-        "turn_conditioned_layerwise_eviction",
-    }:
-        enable_legacy_tgv_attention()
+    # Every compression method can make the physical KV cache shorter than the
+    # logical token position used by this continuous-conversation evaluator.
+    enable_legacy_tgv_attention()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"CUDA device {args.device} was requested but is unavailable.")
 
@@ -425,6 +452,14 @@ def main(args):
         args.load_8bit,
         args.load_4bit,
         device=args.device,
+    )
+    # Install the per-layer hooks. They remain inactive unless online_attention()
+    # supplies a cache observe_layer function.
+    enable_online_attention(model)
+
+    # LLaVA-v1.5 normally produces 576 visual tokens for one image.
+    image_token_len_from_tower = int(
+        model.get_vision_tower().num_patches
     )
     args.conv_mode = infer_conv_mode(model_name, args.conv_mode)
     context_length = effective_context_length(model, loader_context_length)
@@ -472,31 +507,88 @@ def main(args):
             base_ids = tokenize_prompt(base_prompt, tokenizer, model.device)
 
             if turn_idx == 0:
-                with torch.no_grad():
-                    model_outputs = model(
-                        input_ids=base_ids,
-                        images=image_tensor,
-                        past_key_values=None,
-                        use_cache=True,
-                        output_attentions=True,
+                # Find the location of the image placeholder in the unexpanded prompt.
+                image_positions = (
+                    base_ids[0] == IMAGE_TOKEN_INDEX
+                ).nonzero(as_tuple=True)[0]
+
+                if image_positions.numel() != 1:
+                    raise ValueError(
+                        f"Expected exactly one image placeholder, "
+                        f"found {image_positions.numel()}."
                     )
-                past_key_values = model_outputs.past_key_values
-                next_logits = model_outputs.logits[:, -1, :]
-                logical_len = past_key_values[0][0].size(2)
-                image_start, image_token_len = infer_actual_image_span(
-                    base_ids, past_key_values
-                )
+
+                image_start = int(image_positions[0].item())
+                image_token_len = image_token_len_from_tower
+
+                # Build the cache before prefill. This gives the transformer-layer hooks
+                # an observe_layer() function while the prefill is running.
                 kv_cache = build_kv_cache(
                     args,
                     model_name,
                     image_start=image_start,
                     image_token_len=image_token_len,
                 )
+
+                # LocalCache does not need attention. All other current methods collect
+                # prefill attention one layer at a time.
+                sink = (
+                    kv_cache.observe_layer
+                    if prefill_reads_attention(kv_cache)
+                    else None
+                )
+
+                # Each transformer layer sends its attention to observe_layer().
+                # The hook then replaces that attention matrix with None, allowing it
+                # to be released before the next layers' matrices accumulate.
+                with torch.no_grad(), online_attention(model, sink):
+                    model_outputs = model(
+                        input_ids=base_ids,
+                        images=image_tensor,
+                        past_key_values=None,
+                        use_cache=True,
+                        output_attentions=sink is not None,
+                    )
+
+                # Keep the KV cache returned by the model.
+                past_key_values = model_outputs.past_key_values
+
+                # Keep only the final-position logits needed to generate the first answer
+                # token. clone() prevents this slice from retaining the entire logits tensor.
+                next_logits = model_outputs.logits[:, -1, :].clone()
+
+                # All prefill attention statistics have already been stored in kv_cache.
+                del model_outputs
+
+                # This is the logical length after the image placeholder has expanded into
+                # the model's complete sequence of visual tokens.
+                logical_len = past_key_values[0][0].size(2)
+
+                # Verify that the assumed visual-token range matches the actual expanded
+                # KV-cache range.
+                actual_image_start, actual_image_token_len = infer_actual_image_span(
+                    base_ids,
+                    past_key_values,
+                )
+
+                if (
+                    actual_image_start != image_start
+                    or actual_image_token_len != image_token_len
+                ):
+                    raise RuntimeError(
+                        "The image span inferred from the expanded KV cache differs "
+                        "from the vision tower's patch count: "
+                        f"expected ({image_start}, {image_token_len}), "
+                        f"got ({actual_image_start}, {actual_image_token_len})."
+                    )
+
+                # attentions=None is intentional. The attention statistics were already
+                # collected layer by layer through kv_cache.observe_layer().
                 past_key_values = apply_cache(
                     kv_cache,
                     past_key_values,
                     logical_len,
-                    model_outputs.attentions,
+                    None,
                 )
             else:
                 new_turn_ids = require_prefix(

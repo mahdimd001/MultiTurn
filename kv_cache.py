@@ -996,25 +996,37 @@ class ElasticCache:
         self.layer_num = layer_num
 
         self.selected_idx = 0
+        
+    def observe_layer(self, layer_idx, attention):
+        """Collect one layer's prefill importance without retaining its map."""
+        if attention.shape[-2] <= 1:
+            return
+
+        incoming = (
+            attention[0]
+            .mean(dim=0)
+            .sum(dim=0, dtype=torch.float32)
+        )
+
+        self.score_sum[layer_idx, :incoming.shape[-1]] += incoming
 
     def __call__(self, past_key_values, num_of_token=None, attentions=None):
         if past_key_values is None:
             return None
-        attn_score = [attention for attention in attentions]
+        
         seq_len = past_key_values[0][0].size(self.k_seq_dim)
 
-        # update attn score
-        attn_score = torch.cat(attn_score, dim=0)
-        attn_score = attn_score.mean(dim=1, keepdim=False)
-        if attn_score.shape[-2] > 1:
-            #assert self.flag is True # only use for the first time
-            if self.flag is not True: #added by tabassum
-                return past_key_values #added by tabassum
-            for idx in range(attn_score.shape[-2]): #check again fro (-2)
-                cur_score = attn_score[:, idx, :idx+1]
-                self.score_sum[:, :(cur_score.shape[-1])] += cur_score
-        else:
-            pass
+        # Fallback when the evaluator returns a normal tuple of layer attentions.
+        if (
+            attentions is not None
+            and attentions[0] is not None
+            and attentions[0].shape[-2] > 1
+        ):
+            if self.flag is not True:
+                return past_key_values
+
+            for layer_idx, attention in enumerate(attentions):
+                self.observe_layer(layer_idx, attention)
 
         forget_num = int(seq_len - num_of_token * (1 - self.ratio))
         if forget_num <= 0:

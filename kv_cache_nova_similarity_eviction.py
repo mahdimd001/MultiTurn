@@ -76,9 +76,28 @@ class H2OCache:
         self.ratio = float(ratio)
         self.protect_size = 1
         self.score_sum = None
+        self._pending_sum = None
+        self._pending_layers = 0
 
     def reset(self):
         self.score_sum = None
+        self._pending_sum = None
+        self._pending_layers = 0
+
+    def observe_layer(self, layer_idx, attention):
+        """Accumulate one layer's incoming attention per KV key."""
+        incoming = (
+            attention[0]
+            .mean(dim=0, dtype=torch.float32)
+            .sum(dim=0)
+        )
+
+        if self._pending_sum is None:
+            self._pending_sum = incoming
+        else:
+            self._pending_sum += incoming
+
+        self._pending_layers += 1
 
     @staticmethod
     def _mean_attention(attentions):
@@ -125,17 +144,30 @@ class H2OCache:
             raise ValueError("H2OCache requires num_of_token for ratio-based pruning.")
 
         seq_len = past_key_values[0][0].size(self.k_seq_dim)
-        attn = self._mean_attention(attentions)  # [query_len, key_len]
-        if attn.shape[-1] != seq_len:
-            raise RuntimeError(
-                f"H2O attention key length {attn.shape[-1]} != KV length {seq_len}."
+        
+        # Fallback when attentions were returned normally instead of through the hook.
+        if attentions is not None and attentions[0] is not None:
+            for layer_idx, attention in enumerate(attentions):
+                self.observe_layer(layer_idx, attention)
+
+        if self._pending_sum is None:
+            raise ValueError(
+                "H2OCache requires output_attentions=True "
+                "(or the online attention hook)."
             )
 
-        self._grow_scores(seq_len, attn.device)
+        incoming = self._pending_sum / self._pending_layers
+        self._pending_sum = None
+        self._pending_layers = 0
 
-        # Incoming attention received by each physical KV key from the current
-        # query block. Works for both initial prefill and one-token later turns.
-        self.score_sum += attn.sum(dim=0)
+        if incoming.shape[-1] != seq_len:
+            raise RuntimeError(
+                f"H2O attention key length {incoming.shape[-1]} "
+                f"!= KV length {seq_len}."
+            )
+
+        self._grow_scores(seq_len, incoming.device)
+        self.score_sum += incoming
 
         # num_of_token is the logical, uncompressed stream length.
         target_size = max(1, int(num_of_token * (1.0 - self.ratio)))

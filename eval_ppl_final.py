@@ -48,6 +48,10 @@ from kv_cache_final import (
     enable_legacy_tgv_attention,
     set_legacy_logical_position_limit,
 )
+from tgv_kv_legacy_nova import (
+    enable_online_attention,
+    online_attention,
+)
 
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates
@@ -293,6 +297,16 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
         attentions=attentions,
     )
 
+def prefill_reads_attention(kv_cache):
+    """Every current method except LocalCache scores the prefill."""
+    return not isinstance(kv_cache, LocalCache)
+
+
+def decode_reads_attention(kv_cache):
+    """Return whether one-token continuation attention is required."""
+    # LocalCache never reads attention.
+    # ElasticCache scores only the initial prefill.
+    return not isinstance(kv_cache, (LocalCache, ElasticCache))
 
 def finalize_turn_cache(kv_cache, past_key_values):
     """Run boundary-only compression for a turn-isolated cache."""
@@ -337,17 +351,16 @@ def forward_one_text_token(model, token_ids, past_key_values, kv_cache, num_of_t
         device=token_ids.device,
     )
 
-    # Nonuniform layer budgets need an explicit logical RoPE limit because
-    # physical layer lengths no longer equal the logical conversation length.
-    if isinstance(kv_cache, (TGVKVCache, TurnConditionedLayerwiseKVCache)):
-        set_legacy_logical_position_limit(model, num_of_token + 1)
+    # Every compression method may have a physical KV length shorter than the
+    # logical conversation position.
+    set_legacy_logical_position_limit(model, num_of_token + 1)
 
     outputs = model(
         input_ids=token_ids,
         position_ids=logical_position_ids,
         past_key_values=past_key_values,
         use_cache=True,
-        output_attentions=True,
+        output_attentions=decode_reads_attention(kv_cache),
     )
 
     # One logical text token has now been committed.
@@ -446,8 +459,9 @@ def main(args):
         "turn_conditioned_layerwise_merge",
         "turn_conditioned_layerwise_eviction",
     }
-    if args.method in turn_conditioned_methods | {"tgv_kv"}:
-        enable_legacy_tgv_attention()
+    # Every cache method may have a physical KV length shorter than its logical
+    # RoPE position after compression.
+    enable_legacy_tgv_attention()
 
     # Nova/GPU path: keep device handling simple and explicit.
     if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -498,6 +512,11 @@ def main(args):
         args.load_4bit,
         device=args.device,
     )
+
+    enable_online_attention(model)
+
+    vision_tower = model.get_vision_tower()
+    image_token_len_from_tower = int(vision_tower.num_patches)
 
     args.conv_mode = choose_conversation_mode(model_name, args.conv_mode)
 
@@ -567,39 +586,83 @@ def main(args):
                     base_prompt, tokenizer, model.device
                 )
 
-                # --------------------------------------------------------
-                # FIRST AND ONLY multimodal prefill for this conversation.
-                # --------------------------------------------------------
-                with torch.no_grad():
-                    outputs = model(
-                        input_ids=base_ids,
-                        images=image_tensor,
-                        past_key_values=None,
-                        use_cache=True,
-                        output_attentions=True,
+                image_positions = (
+                    base_ids[0] == IMAGE_TOKEN_INDEX
+                ).nonzero(as_tuple=True)[0]
+
+                if image_positions.numel() != 1:
+                    raise ValueError(
+                        f"Expected exactly one image placeholder, "
+                        f"found {image_positions.numel()}"
                     )
 
-                past_key_values = outputs.past_key_values
-                next_token_logits = outputs.logits[:, -1, :]
+                image_start = int(image_positions[0].item())
+                image_token_len = image_token_len_from_tower
 
-                # Use the expanded model sequence length rather than the raw
-                # input_ids length, because one image placeholder expands into
-                # many visual tokens inside LLaVA.
-                effective_prefill_len = past_key_values[0][0].size(2)
-                num_of_token = effective_prefill_len
-
-                # Infer where the ACTUAL visual KV block is located.
-                image_start, image_token_len = infer_actual_image_span(
-                    base_ids, past_key_values, k_seq_dim=2
-                )
-                # Build the cache only AFTER the first forward pass so that the
-                # multimodal cache receives the true visual-token length.
+                # The cache must exist before the model runs so each layer can immediately
+                # deliver its attention statistics.
                 kv_cache = build_cache(
                     args,
                     model_name,
                     image_start=image_start,
                     image_token_len=image_token_len,
                 )
+
+                sink = (
+                    kv_cache.observe_layer
+                    if prefill_reads_attention(kv_cache)
+                    else None
+                )
+
+                # --------------------------------------------------------
+                # FIRST AND ONLY multimodal prefill for this conversation.
+                # --------------------------------------------------------
+                # During this forward pass:
+                #   layer 0 attention -> sink -> reduced -> discarded
+                #   layer 1 attention -> sink -> reduced -> discarded
+                #   ...
+                # Therefore the model does not retain all layer attention matrices.
+                with torch.no_grad(), online_attention(model, sink):
+                    outputs = model(
+                        input_ids=base_ids,
+                        images=image_tensor,
+                        past_key_values=None,
+                        use_cache=True,
+                        output_attentions=sink is not None,
+                    )
+
+                # Save the two outputs that are still needed.
+                past_key_values = outputs.past_key_values
+                next_token_logits = outputs.logits[:, -1, :].clone()
+
+                # We no longer need outputs.attentions:
+                # observe_layer() already received every layer's attention through the hook.
+                # Deleting outputs allows the full-prompt logits and returned container to be released.
+                del outputs
+
+                # This is the expanded sequence length:
+                # ordinary text tokens + all 576 visual tokens.
+                effective_prefill_len = past_key_values[0][0].size(2)
+                num_of_token = effective_prefill_len
+
+                # Confirm that the image position and visual-token count supplied before
+                # the forward agree with the actual expanded KV cache.
+                actual_image_start, actual_image_token_len = infer_actual_image_span(
+                    base_ids,
+                    past_key_values,
+                    k_seq_dim=2,
+                )
+
+                if (
+                    actual_image_start != image_start
+                    or actual_image_token_len != image_token_len
+                ):
+                    raise RuntimeError(
+                        "The image span inferred from the expanded KV cache differs "
+                        "from the vision tower's patch count: "
+                        f"expected ({image_start}, {image_token_len}), "
+                        f"got ({actual_image_start}, {actual_image_token_len})."
+                    )
 
                 if args.debug:
                     print(
@@ -609,13 +672,15 @@ def main(args):
                         f"image_start={image_start}, "
                         f"image_token_len={image_token_len}"
                     )
-
-                # Apply pruning/merging to the first multimodal prefill.
+                
+                # Apply the cache policy.
+                # attentions=None is intentional. The cache already collected the required
+                # statistics one layer at a time through observe_layer().
                 past_key_values = apply_cache(
                     kv_cache,
                     past_key_values,
                     num_of_token,
-                    outputs.attentions,
+                    None,
                 )
 
             else:

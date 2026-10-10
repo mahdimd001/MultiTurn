@@ -145,16 +145,32 @@ class TurnConditionedLayerwiseKVCache:
             p[lo:hi] = self.IMAGE
         return p
 
-    def _initialize(self, past_key_values, device):
-        if len(past_key_values) != self.layer_num:
-            raise RuntimeError(f"Expected {self.layer_num} layers, got {len(past_key_values)}")
-        self.score_sum, self.conn_score_sum, self.provenance = [], [], []
-        for k, _ in past_key_values:
-            length = k.size(self.k_seq_dim)
-            self.score_sum.append(torch.zeros(length, dtype=torch.float32, device=device))
-            self.conn_score_sum.append(torch.zeros(length, dtype=torch.float32, device=device))
-            self.provenance.append(self._initial_provenance(length, device))
-        self.grounding_sum = torch.zeros(self.layer_num, dtype=torch.float32, device=device)
+    def _initialize(self, lengths, device):
+        if len(lengths) != self.layer_num:
+            raise RuntimeError(
+                f"Expected {self.layer_num} layers, got {len(lengths)}"
+            )
+
+        self.score_sum = []
+        self.conn_score_sum = []
+        self.provenance = []
+
+        for length in lengths:
+            self.score_sum.append(
+                torch.zeros(length, dtype=torch.float32, device=device)
+            )
+            self.conn_score_sum.append(
+                torch.zeros(length, dtype=torch.float32, device=device)
+            )
+            self.provenance.append(
+                self._initial_provenance(length, device)
+            )
+
+        self.grounding_sum = torch.zeros(
+            self.layer_num,
+            dtype=torch.float32,
+            device=device,
+        )
         self.history_sum = torch.zeros_like(self.grounding_sum)
         self.query_count = torch.zeros_like(self.grounding_sum)
 
@@ -178,44 +194,92 @@ class TurnConditionedLayerwiseKVCache:
             raise RuntimeError(f"Expected [1, heads, queries, keys], got {tuple(attention.shape)}")
         return attention[0].mean(dim=0)
 
+    def observe_layer(self, layer_idx, attention):
+        """Fold one layer's attention into this cache's statistics."""
+        length = attention.shape[-1]
+
+        if self.score_sum is None:
+            # Initial prefill has equal length in every layer.
+            self._initialize(
+                [length] * self.layer_num,
+                attention.device,
+            )
+
+        self._grow_layer(layer_idx, length)
+        attn = self._layer_attention(attention)
+
+        query_len = attn.shape[0]
+        query_start = length - query_len
+
+        provenance = self.provenance[layer_idx]
+        query_provenance = provenance[query_start:]
+        current_text = query_provenance == self.current_turn
+
+        # Ordinary cumulative incoming attention for KV-token retention.
+        self.score_sum[layer_idx].add_(attn.sum(dim=0).float())
+
+        # Text-query grounding in visual keys.
+        image_keys = provenance == self.IMAGE
+        if image_keys.any():
+            grounded = attn[:, image_keys].sum(dim=1).float()
+            self.conn_score_sum[layer_idx][query_start:].add_(
+                grounded * current_text
+            )
+            self.grounding_sum[layer_idx].add_(
+                grounded[current_text].sum()
+            )
+
+        # Current-turn queries consulting prior-turn text keys.
+        prior_keys = (
+            (provenance >= 0)
+            & (provenance < self.current_turn)
+        )
+        if prior_keys.any():
+            history = attn[:, prior_keys].sum(dim=1).float()
+            self.history_sum[layer_idx].add_(
+                history[current_text].sum()
+            )
+
+        self.query_count[layer_idx].add_(
+            current_text.sum().float()
+        )
+
     def __call__(self, past_key_values, num_of_token=None, attentions=None):
         if past_key_values is None:
             return None
+
         if num_of_token is None:
-            raise ValueError("num_of_token is required for ratio-based pruning")
-        if attentions is None or len(attentions) != self.layer_num:
-            raise ValueError("One attention tensor per transformer layer is required")
+            raise ValueError(
+                "num_of_token is required for ratio-based pruning"
+            )
 
-        device = attentions[0].device
-        if self.score_sum is None:
-            self._initialize(past_key_values, device)
-
-        for layer_idx, ((k, _), attention) in enumerate(zip(past_key_values, attentions)):
-            length = k.size(self.k_seq_dim)
-            self._grow_layer(layer_idx, length)
-            attn = self._layer_attention(attention)
-            if attn.shape[-1] != length:
-                raise RuntimeError(
-                    f"Layer {layer_idx}: attention key length {attn.shape[-1]} != KV length {length}"
+        # Normal-attention fallback. During the initial prefill, the evaluator
+        # normally calls observe_layer directly through the online hook.
+        if attentions is not None and attentions[0] is not None:
+            if len(attentions) != self.layer_num:
+                raise ValueError(
+                    "One attention tensor per transformer layer is required"
                 )
-            query_len = attn.shape[0]
-            query_start = length - query_len
-            provenance = self.provenance[layer_idx]
-            query_provenance = provenance[query_start:]
-            current_text = query_provenance == self.current_turn
 
-            self.score_sum[layer_idx].add_(attn.sum(dim=0).float())
-            image_keys = provenance == self.IMAGE
-            if image_keys.any():
-                grounded = attn[:, image_keys].sum(dim=1).float()
-                self.conn_score_sum[layer_idx][query_start:].add_(grounded * current_text)
-                self.grounding_sum[layer_idx].add_(grounded[current_text].sum())
+            for layer_idx, attention in enumerate(attentions):
+                self.observe_layer(layer_idx, attention)
 
-            prior_keys = (provenance >= 0) & (provenance < self.current_turn)
-            if prior_keys.any():
-                history = attn[:, prior_keys].sum(dim=1).float()
-                self.history_sum[layer_idx].add_(history[current_text].sum())
-            self.query_count[layer_idx].add_(current_text.sum().float())
+        if self.score_sum is None:
+            raise ValueError(
+                "No attention was observed "
+                "(output_attentions=True or the online hook)."
+            )
+
+        # Ensure the statistics consumed by observe_layer match the returned KV.
+        for layer_idx, (k, _) in enumerate(past_key_values):
+            length = k.size(self.k_seq_dim)
+
+            if self.score_sum[layer_idx].numel() != length:
+                raise RuntimeError(
+                    f"Layer {layer_idx}: observed attention covers "
+                    f"{self.score_sum[layer_idx].numel()} keys, "
+                    f"KV has {length}"
+                )
 
         self.latest_logical_len = int(num_of_token)
         return past_key_values
