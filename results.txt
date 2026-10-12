@@ -1,0 +1,39 @@
+Average ROUGE-L F1 over 30 turns: 0.222007
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.283181
+Turn 3 ROUGE-L F1: 0.147707
+
+Average ROUGE-L F1 over 30 turns: 0.222007
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.283181
+Turn 3 ROUGE-L F1: 0.147707
+
+
+Average ROUGE-L F1 over 30 turns: 0.221956
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.283181
+Turn 3 ROUGE-L F1: 0.147552
+
+
+before
+Whole-conversation results
+    ctx method                               ratio prefill  TTFT1 ms TTFT2+ ms  TPOT ms   e2e s out tok/s peak GiB   KV MiB   KV %
+----------------------------------------------------------------------------------------------------------------------------------
+ native full                                  0.00     636     103.1     900.7    27.18    7.21      26.6    14.11    449.0  100.0
+ native local_cache                           0.80     636     108.1     934.3    28.05    7.45      25.8    13.68     90.0   20.0
+ native h2o                                   0.80     636     111.7     940.4    28.70    7.59      25.3    13.68     89.5   19.9
+ native elastic_cache                         0.80     636    1047.2     931.5    28.02    8.37      22.9    13.68     90.0   20.0
+ native tgv_kv                                0.80     636     118.7    1086.0    32.16    8.58      22.4    13.68     90.0   20.1
+ native turn_conditioned_layerwise_eviction   0.80     636     118.9    1616.7    46.88   12.60      15.2    13.92     89.5   19.9
+
+
+after
+ Whole-conversation results
+    ctx method                               ratio prefill  TTFT1 ms TTFT2+ ms  TPOT ms   e2e s out tok/s peak GiB   KV MiB   KV %
+----------------------------------------------------------------------------------------------------------------------------------
+ native full                                  0.00     636     103.1     900.7    27.18    7.21      26.6    14.11    449.0  100.0
+ native local_cache                           0.80     636     108.3     926.1    27.86    7.40      26.0    13.68     90.0   20.0
+ native h2o                                   0.80     636     111.7     940.4    28.70    7.59      25.3    13.68     89.5   19.9
+ native elastic_cache                         0.80     636    1028.4     921.2    28.03    8.34      23.0    13.68     90.0   20.0
+ native tgv_kv                                0.80     636     118.7    1086.0    32.16    8.58      22.4    13.68     90.0   20.1
+ native turn_conditioned_layerwise_eviction   0.80     636     113.2    1254.8    36.96    9.94      19.9    13.92     89.5   19.9

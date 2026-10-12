@@ -762,13 +762,13 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="./models/llava-v1.5-7b")
+    parser.add_argument("--model-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument(
-        "--data-path", type=str, default="./playground/data/mm-vet/mm-vet.json"
+        "--data-path", type=str, default="./ConvBench/convbench.json"
     )
     parser.add_argument(
-        "--image-path", type=str, default="./playground/data/mm-vet/images"
+        "--image-path", type=str, default="./ConvBench/visit_bench_images"
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--conv-mode", type=str, default=None)
@@ -785,7 +785,7 @@ if __name__ == "__main__":
         "--max_token_generated",
         "--max-new-tokens",
         type=parse_generated_token_limit,
-        default=None,
+        default=128,
         metavar="FREE|N|Nk",
         help=(
             "Maximum generated tokens for each turn. Default: free until "
@@ -798,12 +798,12 @@ if __name__ == "__main__":
     parser.add_argument("--image-aspect-ratio", type=str, default="pad")
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--recent-size", type=int, default=2047)
-    parser.add_argument("--eval-samples", type=int, default=218)
+    parser.add_argument("--eval-samples", type=int, default=10)
     parser.add_argument("--exp-name", type=str, default="")
     parser.add_argument(
         "--method",
         type=str,
-        default="turn_conditioned_layerwise_merge",
+        default="turn_conditioned_layerwise_eviction",
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
@@ -816,7 +816,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ratio",
         type=float,
-        default=0.2,
+        default=0.8,
         help="Pruned fraction: 0.8 means prune 80%% and retain about 20%%.",
     )
     parser.add_argument("--alpha", type=float, default=1.0)

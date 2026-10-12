@@ -11,6 +11,7 @@ The cache policy follows the official TGV-KV implementation vendored under
   the correct mask length for each layer.
 """
 
+import contextlib
 import math
 
 import numpy as np
@@ -152,6 +153,50 @@ def set_legacy_logical_position_limit(model, logical_length):
         layer.self_attn._logical_position_limit = int(logical_length)
 
 
+# ---------------------------------------------------------------------------
+# Online (layer-by-layer) attention, like official TGV-KV's
+# collect_online_prefill_attention: each layer's [1, heads, q, k] attention is
+# given to a sink right after that layer runs and is then dropped, so only one
+# layer's attention map is alive at a time instead of all of them.
+# ---------------------------------------------------------------------------
+
+
+def _online_attention_hook(module, args, output):
+    sink = getattr(module, "_online_attention_sink", None)
+    if sink is None or output[1] is None:
+        return output
+    sink(module._online_layer_idx, output[1])
+    return (output[0], None, output[2])  # LlamaModel now stores None
+
+
+def enable_online_attention(model):
+    """Install the per-layer hook once. It does nothing until a sink is set."""
+    inner = model.get_model() if hasattr(model, "get_model") else model.model
+    for layer_idx, layer in enumerate(inner.layers):
+        attn = layer.self_attn
+        attn._online_layer_idx = layer_idx
+        if not getattr(attn, "_online_hook_installed", False):
+            attn.register_forward_hook(_online_attention_hook)
+            attn._online_hook_installed = True
+            attn._online_attention_sink = None
+
+
+def set_online_attention_sink(model, sink):
+    inner = model.get_model() if hasattr(model, "get_model") else model.model
+    for layer in inner.layers:
+        layer.self_attn._online_attention_sink = sink
+
+
+@contextlib.contextmanager
+def online_attention(model, sink):
+    """Route attentions of the forward passes inside the block to `sink`."""
+    set_online_attention_sink(model, sink)
+    try:
+        yield
+    finally:
+        set_online_attention_sink(model, None)
+
+
 class TGVKVCache:
     """Official TGV-KV scoring/allocation adapted to expanded LLaVA images."""
 
@@ -177,42 +222,56 @@ class TGVKVCache:
         self.batch_size = batch_size
         self.ratios = np.full(layer_num, ratio, dtype=np.float32)
         self.initial_text_len_list = [self.protect_size] * layer_num
+        self._online_scores = [None] * layer_num
+        self._online_mass = [None] * layer_num
+
+    def observe_layer(self, layer_idx, attention):
+        """Reduce ONE layer's prefill attention to what _prefill needs."""
+        if attention.shape[-2] <= 1:
+            return  # decode steps are handled by _decode
+        image_start = self.image_start
+        text_start = image_start + self.image_token_len
+        attn = attention.squeeze(0).mean(0).float()  # [q, k], this layer only
+        text_image = attn[text_start:, image_start:text_start]
+        text_text_score = attn[text_start:, text_start:].sum(0, keepdim=True)
+        divisor = torch.arange(
+            1, text_text_score.shape[-1] + 1, device=attn.device
+        ).flip([0]).view(1, -1)
+        text_text_score = text_text_score / divisor
+        text_image_score = (text_image * text_text_score.transpose(-1, -2)).sum(0, keepdim=True)
+        pre_score = attn[:, :image_start].sum(0, keepdim=True) + 100
+        post_score = attn[:, text_start:].sum(0, keepdim=True) + 100
+        self._online_scores[layer_idx] = torch.cat([pre_score, text_image_score, post_score], dim=1)
+        self._online_mass[layer_idx] = text_image.sum()
 
     def __call__(self, past_key_values, num_of_token=None, attentions=None):
         if past_key_values is None:
             return None
-        if attentions is None:
+        if self._online_scores[0] is not None:  # prefill collected layer by layer
+            return self._prefill(past_key_values, num_of_token)
+        if attentions is None or attentions[0] is None:
             raise ValueError("TGV-KV requires output_attentions=True.")
-        if attentions[0].shape[-2] > 1:
-            return self._prefill(past_key_values, num_of_token, attentions)
+        if attentions[0].shape[-2] > 1:  # prefill without the online hook
+            for layer_idx, attention in enumerate(attentions):
+                self.observe_layer(layer_idx, attention)
+            return self._prefill(past_key_values, num_of_token)
         return self._decode(past_key_values, num_of_token, attentions)
 
-    def _prefill(self, past_key_values, num_of_token, attentions):
+    def _prefill(self, past_key_values, num_of_token):
+        if any(score is None for score in self._online_scores):
+            raise RuntimeError("TGV-KV: prefill statistics are missing for some layers.")
+        score_sum = torch.stack(self._online_scores)  # [layers, 1, k]
+        layer_mass = torch.stack(self._online_mass)  # [layers]
+        self._online_scores = [None] * self.layer_num
+        self._online_mass = [None] * self.layer_num
+
         seq_lens = np.array([p[0].size(self.k_seq_dim) for p in past_key_values])
         seq_len = int(seq_lens[0])
         total_forget = int(seq_len - num_of_token * (1 - self.ratio)) * self.layer_num
         if total_forget <= 0:
             return past_key_values
 
-        image_start = self.image_start
-        text_start = image_start + self.image_token_len
-        all_attns = torch.stack([x.squeeze(0).mean(0).float() for x in attentions])
-        text_image_attns = all_attns[:, text_start:, image_start:text_start]
-        text_text_attns = all_attns[:, text_start:, text_start:]
-
-        text_text_score = text_text_attns.sum(1, keepdim=True)
-        divisor = torch.arange(
-            1, text_text_score.shape[-1] + 1, device=text_text_score.device
-        ).flip([0]).view(1, 1, -1)
-        text_text_score = text_text_score / divisor
-        text_image_score = (
-            text_image_attns * text_text_score.transpose(-1, -2)
-        ).sum(1, keepdim=True)
-        pre_score = all_attns[..., :image_start].sum(1, keepdim=True) + 100
-        post_score = all_attns[..., text_start:].sum(1, keepdim=True) + 100
-        score_sum = torch.cat([pre_score, text_image_score, post_score], dim=2)
-
-        layer_mass = text_image_attns.reshape(self.layer_num, -1).sum(dim=1)
+        text_start = self.image_start + self.image_token_len
         if float(layer_mass.sum().item()) <= 0:
             normalized = torch.full_like(layer_mass, 1.0 / self.layer_num)
         else:

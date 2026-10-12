@@ -1,0 +1,76 @@
+{
+  "argv": [
+    "eval_efficiency.py",
+    "--methods",
+    "turn_conditioned_layerwise_eviction",
+    "--ratios",
+    "0.8",
+    "--context-lengths",
+    "native",
+    "--gen-tokens",
+    "64",
+    "--num-turns",
+    "3"
+  ],
+  "args": {
+    "model_path": "/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b",
+    "model_base": null,
+    "data_path": "./ConvBench/convbench.json",
+    "image_path": "./ConvBench/visit_bench_images",
+    "device": "cuda",
+    "conv_mode": "llava_v1",
+    "load_8bit": false,
+    "load_4bit": false,
+    "image_aspect_ratio": "pad",
+    "methods": [
+      "turn_conditioned_layerwise_eviction"
+    ],
+    "ratios": [
+      0.8
+    ],
+    "context_lengths": [
+      "native"
+    ],
+    "gen_tokens": 64,
+    "stop_at_eos": false,
+    "num_turns": 3,
+    "num_samples": 2,
+    "sample_offset": 0,
+    "warmup": 1,
+    "long_context_dir": null,
+    "regenerate_long_context": false,
+    "filler_file": null,
+    "start_size": 1,
+    "recent_size": null,
+    "alpha": 1.0,
+    "beta": 0.8,
+    "cross_turn_weight": 1.0,
+    "temperature": 0.0,
+    "top_p": null,
+    "output_attentions": "auto",
+    "prefill_attention": "per_layer",
+    "breakdown": "auto",
+    "seed": 0,
+    "save_text": false,
+    "output_dir": "logs_efficiency",
+    "exp_name": "efficiency",
+    "resume": false,
+    "summarize_only": false,
+    "fail_fast": false
+  },
+  "model_name": "llava-v1.5-7b",
+  "model_dtype": "torch.bfloat16",
+  "model_context_length": 4096,
+  "loader_context_length": 2048,
+  "image_tokens": 576,
+  "data_files": {
+    "native": "./ConvBench/convbench.json"
+  },
+  "device": "cuda:0",
+  "device_name": "NVIDIA A100 80GB PCIe",
+  "torch": "2.1.2+cu121",
+  "transformers": "4.31.0",
+  "python": "3.10.10",
+  "host": "nova22-gpu-5",
+  "started": "2026-10-11 17:35:23"
+}

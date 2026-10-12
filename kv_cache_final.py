@@ -27,6 +27,7 @@ class TurnConditionedLayerwiseKVCache:
     """
 
     IMAGE = -1
+    SPARE_SLOTS = 256  # metadata room per layer for tokens appended during a turn
 
     def __init__(
         self,
@@ -129,6 +130,8 @@ class TurnConditionedLayerwiseKVCache:
         self.last_layer_scores = None
         self.last_layer_budgets = None
         self.last_finalize_stats = None
+        self._buffers = None  # per layer: (score_buf, conn_buf, provenance_buf)
+        self._key_weights = None  # per layer: [keys, 2] image / prior-turn indicators
 
     def begin_turn(self, turn_id):
         """Mark the provenance id used for text appended in this turn."""
@@ -136,6 +139,12 @@ class TurnConditionedLayerwiseKVCache:
         if self.grounding_sum is not None:
             for tensor in (self.grounding_sum, self.history_sum, self.query_count):
                 tensor.zero_()
+        if self._buffers is not None:
+            # Tokens appended from now on belong to the new turn, and the
+            # previous turn's tokens become "prior" keys.
+            for layer_idx, (_, _, provenance_buf) in enumerate(self._buffers):
+                provenance_buf[self.provenance[layer_idx].numel():] = self.current_turn
+            self._key_weights = [None] * self.layer_num
 
     def _initial_provenance(self, length, device):
         p = torch.full((length,), self.current_turn, dtype=torch.long, device=device)
@@ -151,42 +160,87 @@ class TurnConditionedLayerwiseKVCache:
                 f"Expected {self.layer_num} layers, got {len(lengths)}"
             )
 
-        self.score_sum = []
-        self.conn_score_sum = []
-        self.provenance = []
+        self.score_sum = [None] * self.layer_num
+        self.conn_score_sum = [None] * self.layer_num
+        self.provenance = [None] * self.layer_num
+        self._buffers = [None] * self.layer_num
+        self._key_weights = [None] * self.layer_num
 
-        for length in lengths:
-            self.score_sum.append(
-                torch.zeros(length, dtype=torch.float32, device=device)
-            )
-            self.conn_score_sum.append(
-                torch.zeros(length, dtype=torch.float32, device=device)
-            )
-            self.provenance.append(
-                self._initial_provenance(length, device)
+        for layer_idx, length in enumerate(lengths):
+            zeros = torch.zeros(length, dtype=torch.float32, device=device)
+            self._store_layer(
+                layer_idx, zeros, zeros, self._initial_provenance(length, device)
             )
 
-        self.grounding_sum = torch.zeros(
-            self.layer_num,
-            dtype=torch.float32,
-            device=device,
+        # One [3, layers] tensor; the three statistics are views into it.
+        self._turn_stats = torch.zeros(
+            3, self.layer_num, dtype=torch.float32, device=device
         )
-        self.history_sum = torch.zeros_like(self.grounding_sum)
-        self.query_count = torch.zeros_like(self.grounding_sum)
+        self.grounding_sum = self._turn_stats[0]
+        self.history_sum = self._turn_stats[1]
+        self.query_count = self._turn_stats[2]
+
+    def _store_layer(self, layer_idx, score, conn, provenance, min_capacity=0):
+        """Keep a layer's metadata in buffers with spare room at the end.
+
+        score_sum / conn_score_sum / provenance stay plain 1-D tensors (views
+        of these buffers), so the rest of the class is unchanged, but adding a
+        decode token is a view update instead of three torch.cat calls.
+        """
+        length = score.numel()
+        capacity = max(length, min_capacity) + self.SPARE_SLOTS
+        score_buf = score.new_zeros(capacity)
+        score_buf[:length] = score
+        conn_buf = conn.new_zeros(capacity)
+        conn_buf[:length] = conn
+        provenance_buf = provenance.new_full((capacity,), self.current_turn)
+        provenance_buf[:length] = provenance
+        self._buffers[layer_idx] = (score_buf, conn_buf, provenance_buf)
+        self._key_weights[layer_idx] = None
+        self._expose(layer_idx, length)
+
+    def _expose(self, layer_idx, length):
+        score_buf, conn_buf, provenance_buf = self._buffers[layer_idx]
+        self.score_sum[layer_idx] = score_buf[:length]
+        self.conn_score_sum[layer_idx] = conn_buf[:length]
+        self.provenance[layer_idx] = provenance_buf[:length]
 
     def _grow_layer(self, layer_idx, length):
         old = self.score_sum[layer_idx].numel()
         if length < old:
             raise RuntimeError(f"Layer {layer_idx}: metadata length {old} exceeds KV length {length}")
-        add = length - old
-        if add == 0:
+        if length == old:
             return
-        device = self.score_sum[layer_idx].device
-        zeros = torch.zeros(add, dtype=torch.float32, device=device)
-        turns = torch.full((add,), self.current_turn, dtype=torch.long, device=device)
-        self.score_sum[layer_idx] = torch.cat((self.score_sum[layer_idx], zeros))
-        self.conn_score_sum[layer_idx] = torch.cat((self.conn_score_sum[layer_idx], zeros.clone()))
-        self.provenance[layer_idx] = torch.cat((self.provenance[layer_idx], turns))
+        if length > self._buffers[layer_idx][0].numel():  # spare room used up (rare)
+            self._store_layer(
+                layer_idx,
+                self.score_sum[layer_idx],
+                self.conn_score_sum[layer_idx],
+                self.provenance[layer_idx],
+                min_capacity=length,
+            )
+        # New slots are already score 0, conn 0, provenance = current turn.
+        self._expose(layer_idx, length)
+
+    def _key_weights_for(self, layer_idx, dtype):
+        """[keys, 2] indicators: column 0 = image key, column 1 = prior-turn text key.
+
+        Built once per layer per turn. Keys appended later in the turn carry
+        the current turn id, so both indicators are 0 for them and only the
+        first rows of the attention need to be multiplied.
+        """
+        weights = self._key_weights[layer_idx]
+        if weights is None or weights.dtype != dtype:
+            provenance = self.provenance[layer_idx]
+            weights = torch.stack(
+                (
+                    provenance == self.IMAGE,
+                    (provenance >= 0) & (provenance < self.current_turn),
+                ),
+                dim=1,
+            ).to(dtype)
+            self._key_weights[layer_idx] = weights
+        return weights
 
     @staticmethod
     def _layer_attention(attention):
@@ -206,43 +260,38 @@ class TurnConditionedLayerwiseKVCache:
             )
 
         self._grow_layer(layer_idx, length)
-        attn = self._layer_attention(attention)
+        attn = self._layer_attention(attention)  # [queries, keys], model dtype
 
         query_len = attn.shape[0]
         query_start = length - query_len
 
-        provenance = self.provenance[layer_idx]
-        query_provenance = provenance[query_start:]
-        current_text = query_provenance == self.current_turn
+        # Per query: attention mass on image keys (col 0) and on prior-turn
+        # text keys (col 1). One matmul replaces the boolean-mask gathers and
+        # .any() checks, each of which forced a GPU->CPU sync.
+        weights = self._key_weights_for(layer_idx, attn.dtype)
+        grounded_history = (attn[:, : weights.shape[0]] @ weights).float()  # [q, 2]
 
+        if query_len == 1:
+            # Decode step: the only query is the token just appended in this
+            # turn, so it is current-turn text (current_text == [True]).
+            self.score_sum[layer_idx].add_(attn[0])
+            self.conn_score_sum[layer_idx][query_start:].add_(grounded_history[:, 0])
+            self._turn_stats[:2, layer_idx].add_(grounded_history[0])
+            self.query_count[layer_idx].add_(1.0)
+            return
+
+        current_text = (
+            self.provenance[layer_idx][query_start:] == self.current_turn
+        ).float()
         # Ordinary cumulative incoming attention for KV-token retention.
         self.score_sum[layer_idx].add_(attn.sum(dim=0).float())
-
-        # Text-query grounding in visual keys.
-        image_keys = provenance == self.IMAGE
-        if image_keys.any():
-            grounded = attn[:, image_keys].sum(dim=1).float()
-            self.conn_score_sum[layer_idx][query_start:].add_(
-                grounded * current_text
-            )
-            self.grounding_sum[layer_idx].add_(
-                grounded[current_text].sum()
-            )
-
-        # Current-turn queries consulting prior-turn text keys.
-        prior_keys = (
-            (provenance >= 0)
-            & (provenance < self.current_turn)
+        # Text-query grounding in visual keys (only current-turn text queries).
+        self.conn_score_sum[layer_idx][query_start:].add_(
+            grounded_history[:, 0] * current_text
         )
-        if prior_keys.any():
-            history = attn[:, prior_keys].sum(dim=1).float()
-            self.history_sum[layer_idx].add_(
-                history[current_text].sum()
-            )
-
-        self.query_count[layer_idx].add_(
-            current_text.sum().float()
-        )
+        # grounding_sum and history_sum: sums over current-turn text queries.
+        self._turn_stats[:2, layer_idx].add_(current_text @ grounded_history)
+        self.query_count[layer_idx].add_(current_text.sum())
 
     def __call__(self, past_key_values, num_of_token=None, attentions=None):
         if past_key_values is None:
@@ -505,8 +554,13 @@ class TurnConditionedLayerwiseKVCache:
             new_conn.append(layer_conn[retained])
             new_provenance.append(self.provenance[layer_idx][retained])
 
-        self.score_sum, self.conn_score_sum = new_score, new_conn
-        self.provenance = new_provenance
+        for layer_idx in range(self.layer_num):
+            self._store_layer(
+                layer_idx,
+                new_score[layer_idx],
+                new_conn[layer_idx],
+                new_provenance[layer_idx],
+            )
         self._finish_finalize(scores, budgets, uniform_target, "merge")
         return new_past
 
@@ -540,7 +594,12 @@ class TurnConditionedLayerwiseEvictionKVCache(TurnConditionedLayerwiseKVCache):
             new_conn.append(self.conn_score_sum[layer_idx][retained])
             new_provenance.append(self.provenance[layer_idx][retained])
 
-        self.score_sum, self.conn_score_sum = new_score, new_conn
-        self.provenance = new_provenance
+        for layer_idx in range(self.layer_num):
+            self._store_layer(
+                layer_idx,
+                new_score[layer_idx],
+                new_conn[layer_idx],
+                new_provenance[layer_idx],
+            )
         self._finish_finalize(scores, budgets, uniform_target, "evict")
         return new_past
