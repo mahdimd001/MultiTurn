@@ -42,9 +42,11 @@ from kv_cache_final import (
     ElasticCache,
     H2OCache,
     LocalCache,
+    MEDACache,
     TurnConditionedLayerwiseKVCache,
     TurnConditionedLayerwiseEvictionKVCache,
     TGVKVCache,
+    PyramidKVCache,
     enable_legacy_tgv_attention,
     set_legacy_logical_position_limit,
 )
@@ -275,6 +277,26 @@ def build_cache(
             k_seq_dim=2,
             v_seq_dim=2,
             ratio=args.ratio,
+        )
+    if args.method == "meda":
+        return MEDACache(
+            layer_num=layer_num,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            recent_fraction=args.meda_recent_fraction,
+            entropy_mode=args.meda_entropy,
+            **common,
+        )
+    if args.method == "pyramidkv":
+        return PyramidKVCache(
+            layer_num=layer_num,
+            k_seq_dim=2,
+            v_seq_dim=2,
+            ratio=args.ratio,
+            window_size=args.pyramid_window_size,
+            kernel_size=args.pyramid_kernel_size,
+            pooling=args.pyramid_pooling,
+            beta=args.pyramid_beta,
         )
 
     if args.method == "local_cache":
@@ -528,7 +550,8 @@ def main(args):
     turn_nlls = {}
 
     os.makedirs("logs_ppl_llava", exist_ok=True)
-    data = data[: args.eval_samples]
+    if args.eval_samples is not None and args.eval_samples < len(data):
+        data = data[: args.eval_samples]
 
     # ================================================================
     # Each item is ONE continuous conversation associated with ONE image.
@@ -872,18 +895,22 @@ def main(args):
         per_turn_ppl[str(turn_number)] = float(torch.exp(turn_losses.mean()).item())
         per_turn_token_count[str(turn_number)] = int(turn_losses.numel())
 
+    # use output_dir 
+    # Create the directory (and any missing parent directories)
+    os.makedirs(args.output_dir, exist_ok=True)
+
     # Keep the old one-number text output for compatibility.
-    output_path = os.path.join("logs_ppl_llava", f"{args.exp_name}.txt")
+    output_path = os.path.join(args.output_dir, f"{args.exp_name}.txt")
     with open(output_path, "a") as f:
         f.write(f"{ppl.item()}\n")
 
     # Also write a structured JSON result for paper/evaluation scripts.
-    json_output_path = os.path.join("logs_ppl_llava", f"{args.exp_name}.json")
+    json_output_path = os.path.join(args.output_dir, f"{args.exp_name}.json")
     result = {
         "experiment": args.exp_name,
         "method": args.method,
         "ratio": float(args.ratio),
-        "requested_eval_samples": int(args.eval_samples),
+        "requested_eval_samples": int(args.eval_samples) if args.eval_samples is not None else None,
         "evaluated_items": int(len(data)),
         "overall_ppl": float(ppl.item()),
         "overall_answer_tokens": int(sum(x.numel() for x in nlls)),
@@ -932,10 +959,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # LLaVA/model arguments retained from the original evaluator.
-    parser.add_argument("--model-path", type=str, default="./models/llava-v1.5-7b")
+    parser.add_argument("--model-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--data-path", type=str, default="./playground/data/mm-vet/mm-vet.json")
-    parser.add_argument("--image-path", type=str, default="./playground/data/mm-vet/images")
+    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/ConvBench/convbench.json")
+    parser.add_argument("--image-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/ConvBench/visit_bench_images")
     parser.add_argument("--device", type=str, default="cuda", help="Nova: cuda (default) or cuda:N")
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--load-8bit", action="store_true")
@@ -945,12 +972,12 @@ if __name__ == "__main__":
     # Cache/evaluation arguments retained from the original evaluator.
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--recent-size", type=int, default=2047)
-    parser.add_argument("--eval-samples", type=int, default=100)
-    parser.add_argument("--exp-name", type=str, default="llava-7b-multiturn-fixed")
+    parser.add_argument("--eval-samples", type=int, default=2)
+    parser.add_argument("--exp-name", type=str, default="llava-7b-multiturn")
     parser.add_argument(
         "--method",
         type=str,
-        default="turn_conditioned_layerwise_eviction",
+        default="pyramidkv",
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
@@ -958,12 +985,14 @@ if __name__ == "__main__":
             "local_cache",
             "h2o",
             "elastic_cache",
+            "meda",
+            "pyramidkv",
         ],
     )
-    parser.add_argument("--ratio", type=float, default=0.2)
+    parser.add_argument("--ratio", type=float, default=0.9)
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Ordinary-attention weight for multimodal caches.")
-    parser.add_argument("--beta", type=float, default=0.8,
+    parser.add_argument("--beta", type=float, default=0.2,
                         help="Text-image connection weight for multimodal caches.")
     parser.add_argument(
         "--cross-turn-weight",
@@ -986,7 +1015,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sensitivity-mode",
         choices=["joint", "image", "text", "split"],
-        default="split",
+        default="text",
         help=(
             "Profile field used when --allocation-signal sensitivity. Split "
             "uses image at the first boundary and image+text afterward."
@@ -995,7 +1024,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sensitivity-profile",
         type=str,
-        default=None,
+        default="./sensitivity_llava7b_r90.json",
         help=(
             "JSON written by calibrate_sensitivity.py or "
             "calibrate_sensitivity_joint.py."
@@ -1010,6 +1039,33 @@ if __name__ == "__main__":
             "separate from --alpha, the token-attention score weight."
         ),
     )
+
+    parser.add_argument("--output-dir", type=str, default="logs_ppl_llava", help="Directory to save PPL logs.")
+
+
+    # MEDA-specific arguments.  The original paper used a 3:1 recent-to-history ratio.
+    parser.add_argument(
+        "--meda-recent-fraction",
+        type=float,
+        default=0.75,
+        help="MEDA: share of each layer budget kept as the recent window (paper 3:1).",
+    )
+    parser.add_argument(
+        "--meda-entropy",
+        choices=["crossmodal", "full"],
+        default="crossmodal",
+        help="MEDA layer entropy: paper cross-modal (default) or released-code full-attention.",
+    )
+
+    # PyramidKV-specific arguments.  The original PyramidKV paper used a window size of 8 and a kernel size of 7.
+    parser.add_argument("--pyramid-window-size", type=int, default=8,
+                        help="PyramidKV: observation window (KVCache-Factory uses 8).")
+    parser.add_argument("--pyramid-kernel-size", type=int, default=7,
+                        help="PyramidKV: pooling kernel over keys (odd).")
+    parser.add_argument("--pyramid-pooling", choices=["maxpool", "avgpool"], default="maxpool",
+                        help="PyramidKV: score pooling.")
+    parser.add_argument("--pyramid-beta", type=float, default=20,
+                        help="PyramidKV: top/bottom budget spread; last layer gets M // beta.")
 
     # Debug mode prints per-turn token counts and physical KV lengths.  This is
     # particularly useful while validating a new multi-turn dataset/cache.

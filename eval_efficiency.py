@@ -98,6 +98,9 @@ Run with --summarize-only to merge every *_conversations.jsonl in the output
 directory (e.g. from a SLURM array) into all_summary*.csv.
 """
 
+
+# python eval_efficiency.py --methods turn_conditioned_layerwise_eviction full tgv_kv pyramidkv meda elastic_cache h2o local_cache  --ratios 0.9 --context-lengths native --gen-tokens 64 --num-turns 3
+
 import argparse
 import contextlib
 import csv
@@ -124,6 +127,8 @@ ALL_METHODS = [
     "tgv_kv",
     "turn_conditioned_layerwise_merge",
     "turn_conditioned_layerwise_eviction",
+    "meda",
+    "pyramidkv"
 ]
 # These policies never read attention maps, so by default they do not pay for
 # materialising them (use --output-attentions always to match the ROUGE run).
@@ -614,20 +619,20 @@ class ConversationState:
 class Benchmark:
     def __init__(self, args):
         # Heavy imports live here so --help/--summarize-only stay lightweight.
-        global build_kv_cache, effective_context_length
-        global finalize_turn_cache, infer_actual_image_span, infer_conv_mode
+        global build_cache, effective_context_length
+        global finalize_turn_cache, infer_actual_image_span, choose_conversation_mode
         global load_image, select_next_token, stop_token_sequences
         global enable_legacy_tgv_attention, set_legacy_logical_position_limit
         global DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX, SeparatorStyle, conv_templates
         global get_model_name_from_path, process_images, tokenizer_image_token
         global load_pretrained_model
 
-        from eval_rogue_final import (
-            build_kv_cache,
+        from eval_rouge_final2 import (
+            build_cache,
             effective_context_length,
             finalize_turn_cache,
             infer_actual_image_span,
-            infer_conv_mode,
+            choose_conversation_mode,
             load_image,
             select_next_token,
             stop_token_sequences,
@@ -668,7 +673,7 @@ class Benchmark:
         self.model.eval()
         self.device = self.model.device
         self.dtype = getattr(self.model, "dtype", next(self.model.parameters()).dtype)
-        args.conv_mode = infer_conv_mode(self.model_name, args.conv_mode)
+        args.conv_mode = choose_conversation_mode(self.model_name, args.conv_mode)
         self.template = conv_templates[args.conv_mode]
         # The LLaVA loader reports 2048 whenever the config lacks
         # max_sequence_length (true for llava-v1.5), although the model has
@@ -839,6 +844,19 @@ class Benchmark:
             alpha=args.alpha,
             beta=args.beta,
             cross_turn_weight=args.cross_turn_weight,
+            # Added attributes required by eval_rouge_final2.py's build_cache
+            allocation_signal=getattr(args, "allocation_signal", "turn"),
+            sensitivity_mode=getattr(args, "sensitivity_mode", "text"),
+            sensitivity_joint=getattr(args, "sensitivity_joint", None),
+            sensitivity_image=getattr(args, "sensitivity_image", None),
+            sensitivity_text=getattr(args, "sensitivity_text", None),
+            sens_alpha=getattr(args, "sens_alpha", 1.0),
+            meda_recent_fraction=getattr(args, "meda_recent_fraction", 0.75),
+            meda_entropy=getattr(args, "meda_entropy", "crossmodal"),
+            pyramid_window_size=getattr(args, "pyramid_window_size", 8),
+            pyramid_kernel_size=getattr(args, "pyramid_kernel_size", 7),
+            pyramid_pooling=getattr(args, "pyramid_pooling", "maxpool"),
+            pyramid_beta=getattr(args, "pyramid_beta", 20),
         )
 
     def load_item_image(self, item):
@@ -980,7 +998,7 @@ class Benchmark:
                 # as that layer finishes (never all 32 maps at once).
                 if method != "full":
                     policy = self.make_policy_config(method, config["ratio"], max_logical)
-                    state.kv_cache = build_kv_cache(
+                    state.kv_cache = build_cache(
                         policy,
                         self.model_name,
                         image_start=expected_span[0],

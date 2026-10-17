@@ -549,20 +549,20 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="./models/llava-v1.5-7b")
+    parser.add_argument("--model-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--image-path", type=str, required=True)
+    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/ConvBench/convbench.json")
+    parser.add_argument("--image-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/ConvBench/visit_bench_images")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--image-aspect-ratio", type=str, default="pad")
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")
-    parser.add_argument("--calib-samples", type=int, default=16)
+    parser.add_argument("--calib-samples", type=int, default=32)
     parser.add_argument(
         "--calib-offset",
         type=int,
-        default=0,
+        default=100,
         help=(
             "Skip this many dataset items before calibration. Use a disjoint "
             "range from the evaluation items when possible."
@@ -571,10 +571,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--probe-ratio",
         type=float,
-        default=0.8,
+        default=0.90,
         help=(
             "Pruning ratio simulated by the masked pass. Match this to the "
-            "evaluation --ratio (0.8 means retain 20%%)."
+            "evaluation --ratio (0.9 means retain 10%%)."
         ),
     )
     parser.add_argument(
@@ -583,5 +583,5 @@ if __name__ == "__main__":
         default=4,
         help="Number of earliest prior-text positions retained by the text probe.",
     )
-    parser.add_argument("--out", type=str, default="sensitivity_profile.json")
+    parser.add_argument("--out", type=str, default="sensitivity_llava7b_r90.json")
     main(parser.parse_args())

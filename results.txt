@@ -37,3 +37,135 @@ after
  native elastic_cache                         0.80     636    1028.4     921.2    28.03    8.34      23.0    13.68     90.0   20.0
  native tgv_kv                                0.80     636     118.7    1086.0    32.16    8.58      22.4    13.68     90.0   20.1
  native turn_conditioned_layerwise_eviction   0.80     636     113.2    1254.8    36.96    9.94      19.9    13.92     89.5   19.9
+
+
+
+ConvBench
+Ours
+beta 0.8
+ Average ROUGE-L F1 over 30 turns: 0.221956
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.283181
+Turn 3 ROUGE-L F1: 0.147552
+
+beta 0.2
+Average ROUGE-L F1 over 30 turns: 0.225258
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.287575
+Turn 3 ROUGE-L F1: 0.153065
+
+sensitivity - text
+Average ROUGE-L F1 over 30 turns: 0.226976
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.263017
+Turn 3 ROUGE-L F1: 0.182778
+
+split
+Average ROUGE-L F1 over 30 turns: 0.220674
+Turn 1 ROUGE-L F1: 0.235134
+Turn 2 ROUGE-L F1: 0.260622
+Turn 3 ROUGE-L F1: 0.166264
+
+tgv_kv
+Average ROUGE-L F1 over 30 turns: 0.223016
+Turn 1 ROUGE-L F1: 0.230174
+Turn 2 ROUGE-L F1: 0.253022
+Turn 3 ROUGE-L F1: 0.185852
+
+
+
+multiverse
+tgv_kv
+Average ROUGE-L F1 over 30 turns: 0.228027
+Turn 1 ROUGE-L F1: 0.220086
+Turn 2 ROUGE-L F1: 0.246775
+Turn 3 ROUGE-L F1: 0.217220
+
+
+Ours
+16 conv
+Average ROUGE-L F1 over 30 turns: 0.229380 
+Turn 1 ROUGE-L F1: 0.229611
+Turn 2 ROUGE-L F1: 0.242071
+Turn 3 ROUGE-L F1: 0.216458
+
+Average ROUGE-L F1 over 30 turns: 0.234038
+Turn 1 ROUGE-L F1: 0.229611
+Turn 2 ROUGE-L F1: 0.245866
+Turn 3 ROUGE-L F1: 0.226638
+
+32 conv
+
+64conv
+
+ours multiverse-sensitivity 32
+Average ROUGE-L F1 over 30 turns: 0.230503
+Turn 1 ROUGE-L F1: 0.229611
+Turn 2 ROUGE-L F1: 0.251840
+Turn 3 ROUGE-L F1: 0.210057
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------------
+ours -0.9 PR-sensiiviity
+Average ROUGE-L F1 over 30 turns: 0.223596
+Turn 1 ROUGE-L F1: 0.229611
+Turn 2 ROUGE-L F1: 0.244551
+Turn 3 ROUGE-L F1: 0.196627
+
+
+
+ours-0.9-turn
+Average ROUGE-L F1 over 30 turns: 0.222909
+Turn 1 ROUGE-L F1: 0.229611
+Turn 2 ROUGE-L F1: 0.239283
+Turn 3 ROUGE-L F1: 0.199835
+
+tgv_kv
+Average ROUGE-L F1 over 30 turns: 0.220125
+Turn 1 ROUGE-L F1: 0.205152
+Turn 2 ROUGE-L F1: 0.241821
+Turn 3 ROUGE-L F1: 0.213403
+
+
+pyramid
+Average ROUGE-L F1 over 30 turns: 0.225471
+Turn 1 ROUGE-L F1: 0.216437
+Turn 2 ROUGE-L F1: 0.242726
+Turn 3 ROUGE-L F1: 0.217251
+
+local_cache
+Average ROUGE-L F1 over 30 turns: 0.196857
+Turn 1 ROUGE-L F1: 0.135696
+Turn 2 ROUGE-L F1: 0.222784
+Turn 3 ROUGE-L F1: 0.232089
+
+h2o
+Average ROUGE-L F1 over 30 turns: 0.031110
+Turn 1 ROUGE-L F1: 0.041092
+Turn 2 ROUGE-L F1: 0.032392
+Turn 3 ROUGE-L F1: 0.019846
+
+elastic_cache
+Average ROUGE-L F1 over 30 turns: 0.154209
+Turn 1 ROUGE-L F1: 0.021957
+Turn 2 ROUGE-L F1: 0.221048
+Turn 3 ROUGE-L F1: 0.219623
+
+
+
+
+
+
+

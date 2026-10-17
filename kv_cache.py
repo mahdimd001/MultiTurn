@@ -1045,9 +1045,24 @@ class ElasticCache:
                     selected_idx = torch.where(torch.argsort(self.score_sum[idx, self.start_size:(seq_len - self.protect_size)]) > forget_num)[0] + self.start_size
                     throw_idx = torch.where(torch.argsort(self.score_sum[idx, self.start_size:(seq_len - self.protect_size)]) <= forget_num)[0]
                     merge_idx = []
-                    for i in range(len(throw_idx)):
-                        merge_idx.append(selected_idx[torch.abs((selected_idx - throw_idx[i])).argmin()].unsqueeze(0))
-                    merge_idx = torch.cat(merge_idx)
+
+
+
+                    # for i in range(len(throw_idx)):
+                    #     merge_idx.append(selected_idx[torch.abs((selected_idx - throw_idx[i])).argmin()].unsqueeze(0))
+                    # merge_idx = torch.cat(merge_idx)
+
+
+                    
+                    # Replace the inner `for i in range(len(throw_idx)):` loop with this:
+
+                    # samani vectorized approach to find the nearest selected_idx for each throw_idx
+                    distances = torch.abs(selected_idx.unsqueeze(0) - throw_idx.unsqueeze(1))
+                    merge_idx = selected_idx[distances.argmin(dim=1)]
+
+
+
+                    
 
                     selected_idx = torch.cat([torch.arange(self.start_size, device=self.score_sum.device), selected_idx, torch.tensor([seq_len - self.protect_size], device=self.score_sum.device)], dim=0) # the last token is always kept
 

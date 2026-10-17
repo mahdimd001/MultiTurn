@@ -9,6 +9,8 @@ from tgv_kv_legacy_nova import (
     set_legacy_logical_position_limit,
 )
 
+from kv_cache_meda import MEDACache
+from kv_cache_pyramidkv import PyramidKVCache
 
 class TurnConditionedLayerwiseKVCache:
     """Boundary-only KV compression with selectable layer-budget evidence.
