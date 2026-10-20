@@ -169,3 +169,27 @@ Turn 3 ROUGE-L F1: 0.219623
 
 
 
+
+
+
+---------
+coverage 0.2
+Average ROUGE-L F1 over 60 turns: 0.233332
+Turn 1 ROUGE-L F1: 0.244148
+Turn 2 ROUGE-L F1: 0.264391
+Turn 3 ROUGE-L F1: 0.191458
+
+coverage 0.6
+Average ROUGE-L F1 over 60 turns: 0.220210
+Turn 1 ROUGE-L F1: 0.235821
+Turn 2 ROUGE-L F1: 0.242253
+Turn 3 ROUGE-L F1: 0.182556
+
+
+tgv_kv
+Average ROUGE-L F1 over 60 turns: 0.207040
+Turn 1 ROUGE-L F1: 0.240546
+Turn 2 ROUGE-L F1: 0.211166
+Turn 3 ROUGE-L F1: 0.169407
+
+

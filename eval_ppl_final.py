@@ -50,6 +50,7 @@ from kv_cache_final import (
     enable_legacy_tgv_attention,
     set_legacy_logical_position_limit,
 )
+from kv_cache_coverage import TurnConditionedCoverageKVCache
 from tgv_kv_legacy_nova import (
     enable_online_attention,
     online_attention,
@@ -268,6 +269,36 @@ def build_cache(
             **common,
         )
 
+    if args.method == "turn_conditioned_coverage":
+        return TurnConditionedCoverageKVCache(
+            layer_num=layer_num,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            attn_weight=args.alpha,
+            conn_weight=args.beta,
+            cross_turn_weight=args.cross_turn_weight,
+            allocation_signal=args.allocation_signal,
+            sensitivity_mode=args.sensitivity_mode,
+            sensitivity_joint=args.sensitivity_joint,
+            sensitivity_image=args.sensitivity_image,
+            sensitivity_text=args.sensitivity_text,
+            sensitivity_power=args.sens_alpha,
+            coverage_alpha=args.coverage_alpha,
+            coverage_kappa=args.coverage_kappa,
+            similarity=args.coverage_similarity,
+            recent_window=args.coverage_recent_window,
+            text_prior_frac=args.coverage_text_prior,
+            prefill_compress=not args.coverage_no_prefill,
+            relevance=args.coverage_relevance,
+            merge_visual=args.coverage_merge,
+            layer_floor=args.coverage_layer_floor,
+            floor_stage=args.coverage_floor_stage,
+            mass_preserving=not args.coverage_no_mass,
+            mass_min_sim=args.coverage_mass_min_sim,
+            alpha_auto=args.coverage_alpha_auto,
+            **common,
+        )
+
     if args.method == "tgv_kv":
         return TGVKVCache(
             layer_num=layer_num,
@@ -480,6 +511,7 @@ def main(args):
     turn_conditioned_methods = {
         "turn_conditioned_layerwise_merge",
         "turn_conditioned_layerwise_eviction",
+        "turn_conditioned_coverage",
     }
     # Every cache method may have a physical KV length shorter than its logical
     # RoPE position after compression.
@@ -630,6 +662,9 @@ def main(args):
                     image_start=image_start,
                     image_token_len=image_token_len,
                 )
+                # Mass-preserving caches add log(mass) to the key logits of each layer.
+                if hasattr(kv_cache, "attach_model"):
+                    kv_cache.attach_model(model)
 
                 sink = (
                     kv_cache.observe_layer
@@ -981,6 +1016,7 @@ if __name__ == "__main__":
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
+            "turn_conditioned_coverage",
             "tgv_kv",
             "local_cache",
             "h2o",
@@ -1066,6 +1102,34 @@ if __name__ == "__main__":
                         help="PyramidKV: score pooling.")
     parser.add_argument("--pyramid-beta", type=float, default=20,
                         help="PyramidKV: top/bottom budget spread; last layer gets M // beta.")
+
+    # Turn-conditioned coverage (kv_cache_coverage.py) arguments.
+    parser.add_argument("--coverage-alpha", type=float, default=0.5,
+                        help="Coverage: share of expected attention reserved for unseen questions (0 = relevance only).")
+    parser.add_argument("--coverage-kappa", type=float, default=1.0,
+                        help="Coverage: similarity bandwidth in units of the median nearest-neighbour key distance (0 = no coverage).")
+    parser.add_argument("--coverage-similarity", choices=["key", "value", "key_value"], default="key",
+                        help="Coverage: features used for visual-token similarity.")
+    parser.add_argument("--coverage-recent-window", type=int, default=8,
+                        help="Coverage: the most recent text entries always kept at every compression (shrinks to budget//4 at small budgets).")
+    parser.add_argument("--coverage-text-prior", type=float, default=0.5,
+                        help="Coverage: at the Turn-1 prefill, keep current-turn text up to this share of the layer budget.")
+    parser.add_argument("--coverage-no-prefill", action="store_true",
+                        help="Coverage ablation: do not compress after the Turn-1 prefill (boundary-only, like the base method).")
+    parser.add_argument("--coverage-relevance", choices=["text_mean", "cumulative"], default="text_mean",
+                        help="Coverage: debiased text-query relevance (default) or the base method's cumulative attention.")
+    parser.add_argument("--coverage-merge", action="store_true",
+                        help="Coverage: average each evicted visual entry into the anchor that covers it.")
+    parser.add_argument("--coverage-layer-floor", type=float, default=0.5,
+                        help="Coverage: every layer gets at least this share of the uniform per-layer budget (0 = allocation signal only).")
+    parser.add_argument("--coverage-floor-stage", choices=["all", "prefill"], default="all",
+                        help="Coverage: apply the layer floor at every compression or only at the Turn-1 prefill.")
+    parser.add_argument("--coverage-no-mass", action="store_true",
+                        help="Coverage ablation: plain eviction instead of moving evicted visual mass to the covering anchor (proportional attention).")
+    parser.add_argument("--coverage-mass-min-sim", type=float, default=0.25,
+                        help="Coverage: an evicted visual entry's mass moves to its most similar kept anchor only if their kernel similarity is at least this (0 = conserve all image mass).")
+    parser.add_argument("--coverage-alpha-auto", action="store_true",
+                        help="Coverage: choose coverage_alpha automatically for every conversation (ignores --coverage-alpha).")
 
     # Debug mode prints per-turn token counts and physical KV lengths.  This is
     # particularly useful while validating a new multi-turn dataset/cache.

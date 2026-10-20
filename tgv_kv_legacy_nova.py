@@ -118,6 +118,14 @@ def _tgv_compatible_llama_attention_forward(
             layer_mask = torch.cat([padding, attention_mask], dim=-1)
         attn_weights = attn_weights + layer_mask
 
+    # Proportional attention for mass-preserving caches (kv_cache_coverage.py):
+    # a cached entry that stands for m evicted-and-absorbed entries gets
+    # +log(m) on its logit.  Keys appended after the last compression get 0.
+    kv_bias = getattr(self, "_kv_logit_bias", None)
+    if kv_bias is not None:
+        n = min(kv_bias.numel(), attn_weights.shape[-1])
+        attn_weights[..., :n] += kv_bias[:n].to(attn_weights.dtype)
+
     attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states.dtype
     )
@@ -138,6 +146,10 @@ def _tgv_compatible_llama_attention_forward(
     if not output_attentions:
         attn_weights = None
     return attn_output, attn_weights, new_past
+
+
+# kv_cache_coverage.py checks this marker before relying on _kv_logit_bias.
+_tgv_compatible_llama_attention_forward.supports_kv_logit_bias = True
 
 
 def enable_legacy_tgv_attention():
