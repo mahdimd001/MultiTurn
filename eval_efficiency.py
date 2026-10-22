@@ -128,7 +128,8 @@ ALL_METHODS = [
     "turn_conditioned_layerwise_merge",
     "turn_conditioned_layerwise_eviction",
     "meda",
-    "pyramidkv"
+    "pyramidkv",
+    "turn_conditioned_coverage",
 ]
 # These policies never read attention maps, so by default they do not pay for
 # materialising them (use --output-attentions always to match the ROUGE run).
@@ -214,7 +215,7 @@ def build_parser():
         help="Force this many turns per conversation (truncate, or extend with "
         "generic follow-up questions). Default: the dataset's turns (3 for ConvBench).",
     )
-    sweep.add_argument("--num-samples", type=int, default=2, help="Measured conversations per config.")
+    sweep.add_argument("--num-samples", type=int, default=1, help="Measured conversations per config.")
     sweep.add_argument("--sample-offset", type=int, default=0)
     sweep.add_argument("--warmup", type=int, default=1, help="Unmeasured conversations per config.")
 
@@ -857,6 +858,22 @@ class Benchmark:
             pyramid_kernel_size=getattr(args, "pyramid_kernel_size", 7),
             pyramid_pooling=getattr(args, "pyramid_pooling", "maxpool"),
             pyramid_beta=getattr(args, "pyramid_beta", 20),
+            # add coverage attributes for turn_conditioned_coverage
+            coverage_alpha=getattr(args, "coverage_alpha", 0.2),
+            coverage_kappa=getattr(args, "coverage_kappa", 1.0),
+            coverage_similarity=getattr(args, "coverage_similarity", "key"),
+            coverage_recent_window=getattr(args, "coverage_recent_window", 8),
+            coverage_text_prior=getattr(args, "coverage_text_prior", 0.5),
+            coverage_no_prefill=getattr(args, "coverage_no_prefill", False),
+            coverage_relevance=getattr(args, "coverage_relevance", "text_mean"),
+            coverage_merge=getattr(args, "coverage_merge", False),
+            coverage_layer_floor=getattr(args, "coverage_layer_floor", 0.5),
+            coverage_floor_stage=getattr(args, "coverage_floor_stage", "all"),
+            coverage_no_mass=getattr(args, "coverage_no_mass", False),
+            coverage_mass_min_sim=getattr(args, "coverage_mass_min_sim", 0.25),
+            coverage_alpha_auto=getattr(args, "coverage_alpha_auto", False),
+
+
         )
 
     def load_item_image(self, item):
@@ -1004,6 +1021,9 @@ class Benchmark:
                         image_start=expected_span[0],
                         image_token_len=expected_span[1],
                     )
+                    # Add this block to attach the model for mass-preserving caches
+                    if hasattr(state.kv_cache, "attach_model"):
+                        state.kv_cache.attach_model(self.model)
                 sink = None
                 if config["prefill_attention"] == "per_layer":
                     sink = getattr(state.kv_cache, "observe_layer", None)
@@ -1627,7 +1647,8 @@ def print_table(summary):
     header = (
         f"{'ctx':>7} {'method':<36} {'ratio':>5} {'prefill':>7} {'TTFT1 ms':>9} "
         f"{'TTFT2+ ms':>9} {'TPOT ms':>8} {'e2e s':>7} {'out tok/s':>9} "
-        f"{'peak GiB':>8} {'KV MiB':>8} {'KV %':>6}"
+        # f"{'peak GiB':>8} {'KV MiB':>8} {'KV %':>6}"
+        f"{'peak GiB':>8} {'KV MiB':>8} {'KV pk MiB':>9} {'KV %':>6}"
     )
     print("Whole-conversation results")
     print(header)
@@ -1642,7 +1663,8 @@ def print_table(summary):
             f"{_fmt(r['ttft_later_ms']):>9} {_fmt(r['tpot_ms'], 1, 2):>8} "
             f"{_fmt(r['e2e_s'], 1, 2):>7} {_fmt(r['e2e_output_tps']):>9} "
             f"{_fmt(r['peak_mem_gib'], 1, 2):>8} {_fmt(r['kv_final_mib']):>8} "
-            f"{_fmt(r['kv_compression'], 100):>6}"
+            # f"{_fmt(r['kv_compression'], 100):>6}"
+            f"{_fmt(r['kv_max_retained_mib']):>9} {_fmt(r['kv_compression'], 100):>6}"
         )
     if any(_all_layers(r) for r in summary):
         print(ALL_LAYERS_NOTE)

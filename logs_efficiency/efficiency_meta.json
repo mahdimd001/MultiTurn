@@ -2,13 +2,13 @@
   "argv": [
     "eval_efficiency.py",
     "--methods",
-    "elastic_cache",
+    "turn_conditioned_coverage",
     "--ratios",
     "0.9",
     "--context-lengths",
     "native",
     "--gen-tokens",
-    "64",
+    "1024",
     "--num-turns",
     "3"
   ],
@@ -23,7 +23,7 @@
     "load_4bit": false,
     "image_aspect_ratio": "pad",
     "methods": [
-      "elastic_cache"
+      "turn_conditioned_coverage"
     ],
     "ratios": [
       0.9
@@ -31,10 +31,10 @@
     "context_lengths": [
       "native"
     ],
-    "gen_tokens": 64,
+    "gen_tokens": 1024,
     "stop_at_eos": false,
     "num_turns": 3,
-    "num_samples": 2,
+    "num_samples": 1,
     "sample_offset": 0,
     "warmup": 1,
     "long_context_dir": null,
@@ -72,5 +72,5 @@
   "transformers": "4.31.0",
   "python": "3.10.10",
   "host": "nova22-gpu-5",
-  "started": "2026-10-15 17:23:38"
+  "started": "2026-10-20 15:41:14"
 }

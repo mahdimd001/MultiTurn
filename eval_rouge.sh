@@ -21,11 +21,18 @@ module load python/3.10
 source /lustre/hdd/LAS/jannesar-lab/msamani/pythonenv_elasticcache/bin/activate
 
 # === Step 3: Define Parameter Arrays ===
-RATIOS=(0.5 0.8 0.9)
+RATIOS=(0.5)
 METHODS=(
+    "turn_conditioned_layerwise_eviction"
     "turn_conditioned_coverage"
+    "tgv_kv"
+    "local_cache"
+    "h2o"
+    "elastic_cache"
+    "meda"
+    "pyramidkv"
 )
-DATASETS=("Convbench" "MultiVerse")
+DATASETS=("MultiVerse")
 
 # === Step 4: Execute Nested Loops ===
 for DATASET in "${DATASETS[@]}"; do
@@ -33,7 +40,7 @@ for DATASET in "${DATASETS[@]}"; do
         DATA_PATH="./ConvBench/convbench.json"
         IMAGE_PATH="./ConvBench/visit_bench_images"
     else
-        DATA_PATH="./MultiVerse_for_ppl/multiverse_ppl.json"
+        DATA_PATH="./MultiVerse_for_ppl/multiverse_ppl_full.json"
         IMAGE_PATH="./MultiVerse_raw/images"
     fi
 
@@ -50,7 +57,7 @@ for DATASET in "${DATASETS[@]}"; do
             fi
             
             # Construct dynamic output directory 
-            OUTPUT_DIR="./logs_rouge_llava/Merge/${DATASET}-${RATIO}-${METHOD}"
+            OUTPUT_DIR="./logs_rouge_llava/FULL/${DATASET}-${RATIO}-${METHOD}"
 
             echo "======================================================================"
             echo "Running: Dataset=$DATASET | Ratio=$RATIO | Method=$METHOD"
@@ -63,8 +70,7 @@ for DATASET in "${DATASETS[@]}"; do
                 --image-path "$IMAGE_PATH" \
                 --allocation-signal "$ALLOCATION" \
                 --sensitivity-profile "$SENS_PROFILE" \
-                --output-dir "$OUTPUT_DIR" \
-                --coverage-merge
+                --output-dir "$OUTPUT_DIR" 
         done
     done
 done

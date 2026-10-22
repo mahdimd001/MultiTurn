@@ -1270,7 +1270,7 @@ if __name__ == "__main__":
     # LLaVA/model arguments retained from the original evaluator.
     parser.add_argument("--model-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_for_ppl/multiverse_ppl.json")
+    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_for_ppl/multiverse_ppl_full.json")
     parser.add_argument("--image-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_raw/images")
     parser.add_argument("--device", type=str, default="cuda", help="Nova: cuda (default) or cuda:N")
     parser.add_argument("--conv-mode", type=str, default=None)
@@ -1303,7 +1303,7 @@ if __name__ == "__main__":
     # Cache/evaluation arguments retained from the original evaluator.
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--recent-size", type=int, default=2047)
-    parser.add_argument("--eval-samples", type=int, default=10)
+    parser.add_argument("--eval-samples", type=int, default=20)
     parser.add_argument(
         "--exp-name",
         type=str,
@@ -1332,7 +1332,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ratio",
         type=float,
-        default=0.9,
+        default=0.8,
         help="Pruned fraction: 0.9 means prune 90%% and retain about 10%%.",
     )
     parser.add_argument("--alpha", type=float, default=1.0,
@@ -1386,7 +1386,7 @@ if __name__ == "__main__":
     )
 
     # Turn-conditioned coverage (kv_cache_coverage.py) arguments.
-    parser.add_argument("--coverage-alpha", type=float, default=0.2,
+    parser.add_argument("--coverage-alpha", type=float, default=0.0,
                         help="Coverage: share of expected attention reserved for unseen questions (0 = relevance only).")
     parser.add_argument("--coverage-kappa", type=float, default=1.0,
                         help="Coverage: similarity bandwidth in units of the median nearest-neighbour key distance (0 = no coverage).")
@@ -1400,7 +1400,7 @@ if __name__ == "__main__":
                         help="Coverage ablation: do not compress after the Turn-1 prefill (boundary-only, like the base method).")
     parser.add_argument("--coverage-relevance", choices=["text_mean", "cumulative"], default="text_mean",
                         help="Coverage: debiased text-query relevance (default) or the base method's cumulative attention.")
-    parser.add_argument("--coverage-merge", action="store_true", default=True,
+    parser.add_argument("--coverage-merge", action="store_true",
                         help="Coverage: average each evicted visual entry into the anchor that covers it.")
     parser.add_argument("--coverage-layer-floor", type=float, default=0.5,
                         help="Coverage: every layer gets at least this share of the uniform per-layer budget (0 = allocation signal only).")
