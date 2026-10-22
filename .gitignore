@@ -8,9 +8,6 @@ models/
 
 # Datasets / images
 mm-vet/images/
-*.jpg
-*.jpeg
-*.png
 playground/data/
 
 # Logs / outputs
