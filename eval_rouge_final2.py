@@ -67,6 +67,9 @@ from kv_cache_final import (
     set_legacy_logical_position_limit,
 )
 from kv_cache_coverage import TurnConditionedCoverageKVCache
+from kv_cache_atlaskv import AtlasKVCache
+from kv_cache_coverage2 import TurnConditionedCoverage2KVCache
+from kv_cache_turncast import TurnCastKVCache
 from tgv_kv_legacy_nova import (
     enable_online_attention,
     online_attention,
@@ -300,6 +303,17 @@ def build_cache(
 
     if args.method == "elastic_cache":
         return ElasticCache(layer_num=layer_num, **baseline_common)
+    
+    if args.method == "turncast_kv":
+        # Learned forecast of next-turn attention (kv_cache_turncast.py).
+        return TurnCastKVCache(
+            layer_num=layer_num,
+            ratio=args.ratio,
+            scorer_path=getattr(args, "turncast_scorer", None),
+            boundary=getattr(args, "turncast_boundary", "window"),
+            image_start=image_start,
+            image_token_len=image_token_len,
+        )
 
     if args.method == "turn_conditioned_layerwise_merge":
         return TurnConditionedLayerwiseKVCache(
@@ -364,6 +378,30 @@ def build_cache(
             alpha_auto=args.coverage_alpha_auto,
             **common,
         )
+    if args.method == "turn_conditioned_coverage2":
+        return TurnConditionedCoverage2KVCache(
+            layer_num=layer_num,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            attn_weight=args.alpha,
+            conn_weight=args.beta,
+            cross_turn_weight=args.cross_turn_weight,
+            allocation_signal=args.allocation_signal,
+            sensitivity_mode=args.sensitivity_mode,
+            sensitivity_joint=args.sensitivity_joint,
+            sensitivity_image=args.sensitivity_image,
+            sensitivity_text=args.sensitivity_text,
+            sensitivity_power=args.sens_alpha,
+            coverage_alpha=args.coverage_alpha,
+            coverage_kappa=args.coverage_kappa,
+            similarity=args.coverage_similarity,
+            layer_floor=args.coverage_layer_floor,
+            floor_stage=args.coverage_floor_stage,
+            mass_preserving=not args.coverage_no_mass,
+            mass_min_sim=args.coverage_mass_min_sim,
+            part_split=args.coverage2_split,
+            **common,
+        )
 
     if args.method == "tgv_kv":
         return TGVKVCache(
@@ -382,6 +420,13 @@ def build_cache(
             image_token_len=image_token_len,
             recent_fraction=args.meda_recent_fraction,
             entropy_mode=args.meda_entropy,
+            **common,
+        )
+    if args.method == "atlaskv":
+        return AtlasKVCache(
+            layer_num=layer_num,
+            image_start=image_start,
+            image_token_len=image_token_len,
             **common,
         )
     if args.method == "pyramidkv":
@@ -418,14 +463,14 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
 
 def prefill_reads_attention(kv_cache):
     """Every current method except LocalCache scores the prefill."""
-    return not isinstance(kv_cache, LocalCache)
+    return not isinstance(kv_cache, (LocalCache, AtlasKVCache))
 
 
 def decode_reads_attention(kv_cache):
     """Return whether one-token continuation attention is required."""
     # LocalCache never reads attention.
     # ElasticCache scores only the initial prefill.
-    return not isinstance(kv_cache, (LocalCache, ElasticCache))
+    return not isinstance(kv_cache, (LocalCache, ElasticCache, AtlasKVCache))
 
 def finalize_turn_cache(kv_cache, past_key_values):
     """Run boundary-only compression for a turn-isolated cache."""
@@ -1003,6 +1048,11 @@ def main(args):
                         f"[item {item_index} turn {turn_id}] "
                         f"new user/template tokens={new_turn_ids.shape[1]}"
                     )
+            
+            
+            # TurnCast-KV separates this turn's question rows from its answer rows.
+            if hasattr(kv_cache, "begin_answer"):
+                kv_cache.begin_answer()
 
             # ============================================================
             # 2. Generate the assistant answer into the continuing cache.
@@ -1082,11 +1132,35 @@ def main(args):
                     )
 
             # The remaining tokens are conversation-template separators/EOS.
-            separator_ids = require_prefix(
-                ids_with_answer_and_separator,
-                ids_through_answer,
-                description=f"item {item_index}, turn {turn_id}, separator",
-            )
+            # separator_ids = require_prefix(
+            #     ids_with_answer_and_separator,
+            #     ids_through_answer,
+            #     description=f"item {item_index}, turn {turn_id}, separator",
+            # )
+            # The remaining tokens are conversation-template separators/EOS.
+            try:
+                separator_ids = require_prefix(
+                    ids_with_answer_and_separator,
+                    ids_through_answer,
+                    description=f"item {item_index}, turn {turn_id}, separator",
+                )
+            except RuntimeError:
+                # The answer's last characters merged with the separator when the
+                # rendered text was re-tokenized (e.g. trailing whitespace, or an
+                # answer cut mid-word at the token limit).  The KV cache holds the
+                # generated tokens, so feed the separator on its own.
+                separator_text = prompt_with_answer[len(prompt_through_answer):]
+                if separator_text.strip() == tokenizer.eos_token:
+                    sep_list = [tokenizer.eos_token_id]
+                else:
+                    sep_list = tokenizer(separator_text, add_special_tokens=False).input_ids
+                separator_ids = torch.tensor(
+                    [sep_list], dtype=torch.long, device=ids_with_answer_and_separator.device
+                )
+                retokenization_mismatches += 1
+                if args.debug:
+                    print(f"[item {item_index} turn {turn_id}] separator not prefix-stable; "
+                          f"feeding the separator alone: {sep_list}")
 
             # ============================================================
             # 4. Commit the rest of the assistant-turn separator/EOS.
@@ -1321,14 +1395,26 @@ if __name__ == "__main__":
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
             "turn_conditioned_coverage",
+            "turn_conditioned_coverage2",
             "tgv_kv",
             "local_cache",
             "h2o",
             "elastic_cache",
             "meda",
             "pyramidkv",
+            "atlaskv",
+            "turncast_kv",
         ],
     )
+
+
+    # TurnCast-KV (kv_cache_turncast.py): a trained forecaster (turncast/train.py).
+    parser.add_argument("--turncast-scorer", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/turncast_data/turncast_scorer.pt",
+                        help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
+    parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
+                        help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+
+
     parser.add_argument(
         "--ratio",
         type=float,
@@ -1392,7 +1478,7 @@ if __name__ == "__main__":
                         help="Coverage: similarity bandwidth in units of the median nearest-neighbour key distance (0 = no coverage).")
     parser.add_argument("--coverage-similarity", choices=["key", "value", "key_value"], default="key",
                         help="Coverage: features used for visual-token similarity.")
-    parser.add_argument("--coverage-recent-window", type=int, default=8,
+    parser.add_argument("--coverage-recent-window", type=int, default=0,
                         help="Coverage: the most recent text entries always kept at every compression (shrinks to budget//4 at small budgets).")
     parser.add_argument("--coverage-text-prior", type=float, default=0.5,
                         help="Coverage: at the Turn-1 prefill, keep current-turn text up to this share of the layer budget.")
@@ -1412,6 +1498,11 @@ if __name__ == "__main__":
                         help="Coverage: an evicted visual entry's mass moves to its most similar kept anchor only if their kernel similarity is at least this (0 = conserve all image mass).")
     parser.add_argument("--coverage-alpha-auto", action="store_true", default=False,
                         help="Coverage: choose coverage_alpha automatically for every conversation (ignores --coverage-alpha).")
+
+
+
+    parser.add_argument("--coverage2-split", choices=["fill", "proportional"], default="fill",
+                        help="TC-Coverage2: divide a layer's budget among image, history and new text by water-filling (default) or in proportion to importance.")
 
     # ROUGE output arguments.
     parser.add_argument("--output-dir", type=str, default="logs_rouge_llava")

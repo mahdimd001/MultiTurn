@@ -1,0 +1,10 @@
+fit on 461 compression points (135 conversations), validate on 51 (15 conversations); 14977 parameters
+epoch 1: train KL 0.1611  val KL 0.0553  (28s)
+epoch 2: train KL 0.0430  val KL 0.0447  (5s)
+epoch 3: train KL 0.0378  val KL 0.0400  (5s)
+epoch 4: train KL 0.0346  val KL 0.0382  (5s)
+epoch 5: train KL 0.0328  val KL 0.0362  (5s)
+epoch 6: train KL 0.0311  val KL 0.0391  (5s)
+epoch 7: train KL 0.0302  val KL 0.0358  (5s)
+epoch 8: train KL 0.0297  val KL 0.0348  (5s)
+saved turncast_data/turncast_scorer.pt

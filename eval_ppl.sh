@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --time=72:00:00
+#SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --partition=nova
 #SBATCH --account=jannesar-lab
-#SBATCH --job-name="eval_rouge_multi"
+#SBATCH --job-name="ppl_multiverse"
 #SBATCH --mail-user=msamani@iastate.edu
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END
@@ -21,17 +21,11 @@ module load python/3.10
 source /lustre/hdd/LAS/jannesar-lab/msamani/pythonenv_elasticcache/bin/activate
 
 # === Step 3: Define Parameter Arrays ===
-RATIOS=(0.5 0.8 0.9)
+RATIOS=(0.0)
 METHODS=(
-    "turn_conditioned_layerwise_eviction"
-    "tgv_kv"
     "local_cache"
-    "h2o"
-    "elastic_cache"
-    "meda"
-    "pyramidkv"
 )
-DATASETS=("Convbench", "MultiVerse")
+DATASETS=( "Convbench" "MultiVerse" )
 
 # === Step 4: Execute Nested Loops ===
 for DATASET in "${DATASETS[@]}"; do
@@ -39,7 +33,7 @@ for DATASET in "${DATASETS[@]}"; do
         DATA_PATH="./ConvBench/convbench.json"
         IMAGE_PATH="./ConvBench/visit_bench_images"
     else
-        DATA_PATH="./MultiVerse_for_ppl/multiverse_ppl.json"
+        DATA_PATH="./MultiVerse_for_ppl/multiverse_ppl_full.json"
         IMAGE_PATH="./MultiVerse_raw/images"
     fi
 
@@ -56,7 +50,7 @@ for DATASET in "${DATASETS[@]}"; do
             fi
             
             # Construct dynamic output directory 
-            OUTPUT_DIR="./logs_ppl_llava/${DATASET}-${RATIO}-${METHOD}"
+            OUTPUT_DIR="./logs_ppl_llava/FULL_cache/${DATASET}-${RATIO}-${METHOD}"
 
             echo "======================================================================"
             echo "Running: Dataset=$DATASET | Ratio=$RATIO | Method=$METHOD"

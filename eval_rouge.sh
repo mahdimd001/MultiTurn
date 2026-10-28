@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --partition=nova
 #SBATCH --account=jannesar-lab
-#SBATCH --job-name="eval_rouge_multi"
+#SBATCH --job-name="rouge_multiverse"
 #SBATCH --mail-user=msamani@iastate.edu
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END
@@ -21,18 +21,11 @@ module load python/3.10
 source /lustre/hdd/LAS/jannesar-lab/msamani/pythonenv_elasticcache/bin/activate
 
 # === Step 3: Define Parameter Arrays ===
-RATIOS=(0.5)
+RATIOS=(0.0)
 METHODS=(
-    "turn_conditioned_layerwise_eviction"
-    "turn_conditioned_coverage"
-    "tgv_kv"
     "local_cache"
-    "h2o"
-    "elastic_cache"
-    "meda"
-    "pyramidkv"
 )
-DATASETS=("MultiVerse")
+DATASETS=("Convbench"  "MultiVerse")
 
 # === Step 4: Execute Nested Loops ===
 for DATASET in "${DATASETS[@]}"; do
@@ -57,7 +50,7 @@ for DATASET in "${DATASETS[@]}"; do
             fi
             
             # Construct dynamic output directory 
-            OUTPUT_DIR="./logs_rouge_llava/FULL/${DATASET}-${RATIO}-${METHOD}"
+            OUTPUT_DIR="./logs_rouge_llava/FULL_cache/${DATASET}-${RATIO}-${METHOD}"
 
             echo "======================================================================"
             echo "Running: Dataset=$DATASET | Ratio=$RATIO | Method=$METHOD"
@@ -70,7 +63,7 @@ for DATASET in "${DATASETS[@]}"; do
                 --image-path "$IMAGE_PATH" \
                 --allocation-signal "$ALLOCATION" \
                 --sensitivity-profile "$SENS_PROFILE" \
-                --output-dir "$OUTPUT_DIR" 
+                --output-dir "$OUTPUT_DIR"
         done
     done
 done

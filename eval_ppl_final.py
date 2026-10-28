@@ -51,6 +51,8 @@ from kv_cache_final import (
     set_legacy_logical_position_limit,
 )
 from kv_cache_coverage import TurnConditionedCoverageKVCache
+from kv_cache_atlaskv import AtlasKVCache
+from kv_cache_turncast import TurnCastKVCache
 from tgv_kv_legacy_nova import (
     enable_online_attention,
     online_attention,
@@ -235,6 +237,17 @@ def build_cache(
     if args.method == "elastic_cache":
         return ElasticCache(layer_num=layer_num, **baseline_common)
 
+    if args.method == "turncast_kv":
+        # Learned forecast of next-turn attention (kv_cache_turncast.py).
+        return TurnCastKVCache(
+            layer_num=layer_num,
+            ratio=args.ratio,
+            scorer_path=getattr(args, "turncast_scorer", None),
+            boundary=getattr(args, "turncast_boundary", "window"),
+            image_start=image_start,
+            image_token_len=image_token_len,
+        )
+
     if args.method == "turn_conditioned_layerwise_merge":
         return TurnConditionedLayerwiseKVCache(
             layer_num=layer_num,
@@ -318,6 +331,13 @@ def build_cache(
             entropy_mode=args.meda_entropy,
             **common,
         )
+    if args.method == "atlaskv":
+        return AtlasKVCache(
+            layer_num=layer_num,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            **common,
+        )
     if args.method == "pyramidkv":
         return PyramidKVCache(
             layer_num=layer_num,
@@ -352,14 +372,14 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
 
 def prefill_reads_attention(kv_cache):
     """Every current method except LocalCache scores the prefill."""
-    return not isinstance(kv_cache, LocalCache)
+    return not isinstance(kv_cache, (LocalCache, AtlasKVCache))
 
 
 def decode_reads_attention(kv_cache):
     """Return whether one-token continuation attention is required."""
     # LocalCache never reads attention.
     # ElasticCache scores only the initial prefill.
-    return not isinstance(kv_cache, (LocalCache, ElasticCache))
+    return not isinstance(kv_cache, (LocalCache, ElasticCache, AtlasKVCache))
 
 def finalize_turn_cache(kv_cache, past_key_values):
     """Run boundary-only compression for a turn-isolated cache."""
@@ -823,6 +843,10 @@ def main(args):
                 description=f"item {item_index}, turn {turn_id}, separator",
             )
 
+            # TurnCast-KV separates this turn's question rows from its answer rows.
+            if hasattr(kv_cache, "begin_answer"):
+                kv_cache.begin_answer()
+
             if answer_ids.shape[1] == 0:
                 # Empty answers cannot contribute an answer-token NLL, but the
                 # template separator still needs to be committed for next turn.
@@ -1007,12 +1031,12 @@ if __name__ == "__main__":
     # Cache/evaluation arguments retained from the original evaluator.
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--recent-size", type=int, default=2047)
-    parser.add_argument("--eval-samples", type=int, default=2)
+    parser.add_argument("--eval-samples", type=int, default=None)
     parser.add_argument("--exp-name", type=str, default="llava-7b-multiturn")
     parser.add_argument(
         "--method",
         type=str,
-        default="pyramidkv",
+        default="turncast_kv",
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
@@ -1023,8 +1047,20 @@ if __name__ == "__main__":
             "elastic_cache",
             "meda",
             "pyramidkv",
+            "atlaskv",
+            "turncast_kv",
         ],
     )
+
+
+    # TurnCast-KV (kv_cache_turncast.py): a trained forecaster (turncast/train.py).
+    parser.add_argument("--turncast-scorer", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/turncast_data/turncast_scorer.pt",
+                        help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
+    parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
+                        help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+
+
+
     parser.add_argument("--ratio", type=float, default=0.9)
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Ordinary-attention weight for multimodal caches.")
@@ -1104,15 +1140,15 @@ if __name__ == "__main__":
                         help="PyramidKV: top/bottom budget spread; last layer gets M // beta.")
 
     # Turn-conditioned coverage (kv_cache_coverage.py) arguments.
-    parser.add_argument("--coverage-alpha", type=float, default=0.5,
+    parser.add_argument("--coverage-alpha", type=float, default=0.2,
                         help="Coverage: share of expected attention reserved for unseen questions (0 = relevance only).")
     parser.add_argument("--coverage-kappa", type=float, default=1.0,
                         help="Coverage: similarity bandwidth in units of the median nearest-neighbour key distance (0 = no coverage).")
     parser.add_argument("--coverage-similarity", choices=["key", "value", "key_value"], default="key",
                         help="Coverage: features used for visual-token similarity.")
-    parser.add_argument("--coverage-recent-window", type=int, default=8,
+    parser.add_argument("--coverage-recent-window", type=int, default=0,
                         help="Coverage: the most recent text entries always kept at every compression (shrinks to budget//4 at small budgets).")
-    parser.add_argument("--coverage-text-prior", type=float, default=0.5,
+    parser.add_argument("--coverage-text-prior", type=float, default=0.4,
                         help="Coverage: at the Turn-1 prefill, keep current-turn text up to this share of the layer budget.")
     parser.add_argument("--coverage-no-prefill", action="store_true",
                         help="Coverage ablation: do not compress after the Turn-1 prefill (boundary-only, like the base method).")

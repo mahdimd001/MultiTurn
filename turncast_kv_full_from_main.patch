@@ -1,0 +1,4190 @@
+diff --git a/.gitignore b/.gitignore
+index d67cbeb..b9a1bac 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -30,3 +30,6 @@ ecache/
+ .DS_Store
+ venv_qwen/
+ path/to/dir/
++
++# RehearsalKV toy benchmark outputs (data, models, runs)
++rehearsal_toy/work/
+diff --git a/compare_rouge_runs.py b/compare_rouge_runs.py
+new file mode 100644
+index 0000000..2cac626
+--- /dev/null
++++ b/compare_rouge_runs.py
+@@ -0,0 +1,77 @@
++"""Paired comparison of two eval_rouge_final2.py prediction files.
++
++    python compare_rouge_runs.py BASELINE_predictions.json NEW_predictions.json
++
++Both runs must cover the same items in the same order (same --data-path and
++--eval-samples).  Every scored turn is paired with the same turn of the other
++run, so the comparison is per (conversation, turn) and is far more sensitive
++than comparing two averages.
++
++Reports, overall and per turn:
++  mean ROUGE-L F1 of each run, the paired mean difference (new - baseline),
++  a 95% paired bootstrap confidence interval, and win / tie / loss counts.
++A difference whose CI excludes 0 is a reliable improvement or regression.
++"""
++import argparse
++import json
++import random
++
++
++def load_turns(path):
++    data = json.load(open(path))
++    rows = {}
++    for item_index, item in enumerate(data["results"]):
++        for turn in item["turns"]:
++            rows[(item_index, int(turn["turn"]))] = float(turn["rouge_l_f"])
++    return data, rows
++
++
++def bootstrap_ci(diffs, rounds, seed):
++    rng = random.Random(seed)
++    n = len(diffs)
++    means = []
++    for _ in range(rounds):
++        sample = [diffs[rng.randrange(n)] for _ in range(n)]
++        means.append(sum(sample) / n)
++    means.sort()
++    return means[int(0.025 * rounds)], means[int(0.975 * rounds) - 1]
++
++
++def summarize(name, base, new, rounds, seed):
++    diffs = [b - a for a, b in zip(base, new)]
++    n = len(diffs)
++    lo, hi = bootstrap_ci(diffs, rounds, seed)
++    wins = sum(d > 1e-9 for d in diffs)
++    losses = sum(d < -1e-9 for d in diffs)
++    verdict = "better" if lo > 0 else "worse" if hi < 0 else "n.s."
++    print(f"{name:<8} n={n:<5} base={sum(base)/n:.4f} new={sum(new)/n:.4f} "
++          f"diff={sum(diffs)/n:+.4f}  95%CI=[{lo:+.4f},{hi:+.4f}]  "
++          f"W/T/L={wins}/{n - wins - losses}/{losses}  {verdict}")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("baseline")
++    parser.add_argument("new")
++    parser.add_argument("--rounds", type=int, default=5000)
++    parser.add_argument("--seed", type=int, default=0)
++    args = parser.parse_args()
++
++    base_data, base = load_turns(args.baseline)
++    new_data, new = load_turns(args.new)
++    keys = sorted(set(base) & set(new))
++    if len(keys) != len(base) or len(keys) != len(new):
++        print(f"[warning] only {len(keys)} turns are present in both runs "
++              f"(baseline {len(base)}, new {len(new)}).")
++    for data in (base_data, new_data):
++        print(f"{data['experiment']}: method={data['method']} ratio={data['ratio']} "
++              f"items={data['evaluated_items']} avg={data['avg_rouge_l_f']:.4f}")
++    summarize("all", [base[k] for k in keys], [new[k] for k in keys], args.rounds, args.seed)
++    for turn in sorted({k[1] for k in keys}):
++        sub = [k for k in keys if k[1] == turn]
++        summarize(f"turn {turn}", [base[k] for k in sub], [new[k] for k in sub],
++                  args.rounds, args.seed)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/eval_efficiency.py b/eval_efficiency.py
+index e413916..a55e6df 100644
+--- a/eval_efficiency.py
++++ b/eval_efficiency.py
+@@ -130,10 +130,14 @@ ALL_METHODS = [
+     "meda",
+     "pyramidkv",
+     "turn_conditioned_coverage",
++    "rehearsal_kv",
++    "turncast_kv",
+ ]
+ # These policies never read attention maps, so by default they do not pay for
+ # materialising them (use --output-attentions always to match the ROUGE run).
+-ATTENTION_FREE_METHODS = {"full", "local_cache"}
++# RehearsalKV scores with its own short rehearsal pass, never with prefill or
++# decode attention maps.
++ATTENTION_FREE_METHODS = {"full", "local_cache", "rehearsal_kv"}
+ 
+ GIB = float(1024 ** 3)
+ MIB = float(1024 ** 2)
+@@ -250,6 +254,9 @@ def build_parser():
+         "so the ROUGE default of 2047 fails above ~2k tokens.",
+     )
+     policy.add_argument("--alpha", type=float, default=1.0)
++    policy.add_argument("--turncast-scorer", type=str, default=None,
++                        help="turncast_kv: trained forecaster (turncast/train.py).")
++    policy.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window")
+     policy.add_argument("--beta", type=float, default=0.8)
+     policy.add_argument("--cross-turn-weight", type=float, default=1.0)
+     policy.add_argument("--temperature", type=float, default=0.0)
+@@ -872,6 +879,8 @@ class Benchmark:
+             coverage_no_mass=getattr(args, "coverage_no_mass", False),
+             coverage_mass_min_sim=getattr(args, "coverage_mass_min_sim", 0.25),
+             coverage_alpha_auto=getattr(args, "coverage_alpha_auto", False),
++            turncast_scorer=getattr(args, "turncast_scorer", None),
++            turncast_boundary=getattr(args, "turncast_boundary", "window"),
+ 
+ 
+         )
+@@ -1020,7 +1029,10 @@ class Benchmark:
+                         self.model_name,
+                         image_start=expected_span[0],
+                         image_token_len=expected_span[1],
++                        tokenizer=self.tokenizer,
+                     )
++                    if hasattr(state.kv_cache, "register_question"):
++                        state.kv_cache.register_question(questions[0])
+                     # Add this block to attach the model for mass-preserving caches
+                     if hasattr(state.kv_cache, "attach_model"):
+                         state.kv_cache.attach_model(self.model)
+@@ -1131,10 +1143,14 @@ class Benchmark:
+                     else:
+                         t_turn_start = time.perf_counter()
+                         _, user_ids = self.turn_segment_ids(question)
++                        if hasattr(state.kv_cache, "register_question"):
++                            state.kv_cache.register_question(question)
+                         user_tokens = len(user_ids)
+                         input_tokens += user_tokens
+                         self.feed(state, user_ids, decode_attentions, tracker)
+ 
++                    if hasattr(state.kv_cache, "begin_answer"):
++                        state.kv_cache.begin_answer()
+                     limit = args.gen_tokens
+                     if args.stop_at_eos and self.model_context_length:
+                         limit = max(1, min(limit, self.model_context_length - state.logical_len - 8))
+diff --git a/eval_ppl_final.py b/eval_ppl_final.py
+index 2e1960d..c5e6551 100644
+--- a/eval_ppl_final.py
++++ b/eval_ppl_final.py
+@@ -51,6 +51,8 @@ from kv_cache_final import (
+     set_legacy_logical_position_limit,
+ )
+ from kv_cache_coverage import TurnConditionedCoverageKVCache
++from kv_cache_rehearsal import RehearsalKVCache
++from kv_cache_turncast import TurnCastKVCache
+ from tgv_kv_legacy_nova import (
+     enable_online_attention,
+     online_attention,
+@@ -221,9 +223,33 @@ def build_cache(
+     model_name,
+     image_start=None,
+     image_token_len=0,
++    tokenizer=None,
+ ):
+     """Create a fresh cache object for one dataset item/conversation."""
+     layer_num = 32 if "7b" in model_name.lower() else 40
++
++    if args.method == "turncast_kv":
++        # Learned forecast of next-turn attention (kv_cache_turncast.py).
++        return TurnCastKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            scorer_path=getattr(args, "turncast_scorer", None),
++            boundary=getattr(args, "turncast_boundary", "window"),
++            image_start=image_start,
++            image_token_len=image_token_len,
++        )
++
++    if args.method == "rehearsal_kv":
++        return RehearsalKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            start_size=args.start_size,
++            recent_size=getattr(args, "rehearsal_recent_size", 8),
++            tokenizer=tokenizer,
++            acts=tuple(a.strip() for a in getattr(args, "rehearsal_acts", "revisit,recall,explore,respond").split(",") if a.strip()),
++            allocation=getattr(args, "rehearsal_allocation", "demand"),
++            aggregation=getattr(args, "rehearsal_aggregation", "mean"),
++        )
+     common = dict(
+         start_size=args.start_size,
+         k_seq_dim=2,
+@@ -328,6 +354,7 @@ def build_cache(
+             kernel_size=args.pyramid_kernel_size,
+             pooling=args.pyramid_pooling,
+             beta=args.pyramid_beta,
++            exact_budget=getattr(args, "pyramid_exact_budget", False),
+         )
+ 
+     if args.method == "local_cache":
+@@ -352,14 +379,16 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
+ 
+ def prefill_reads_attention(kv_cache):
+     """Every current method except LocalCache scores the prefill."""
+-    return not isinstance(kv_cache, LocalCache)
++    # RehearsalKV scores with its own rehearsal pass, not the prefill attention.
++    return not isinstance(kv_cache, (LocalCache, RehearsalKVCache))
+ 
+ 
+ def decode_reads_attention(kv_cache):
+     """Return whether one-token continuation attention is required."""
+     # LocalCache never reads attention.
+     # ElasticCache scores only the initial prefill.
+-    return not isinstance(kv_cache, (LocalCache, ElasticCache))
++    # RehearsalKV never reads decoding attention.
++    return not isinstance(kv_cache, (LocalCache, ElasticCache, RehearsalKVCache))
+ 
+ def finalize_turn_cache(kv_cache, past_key_values):
+     """Run boundary-only compression for a turn-isolated cache."""
+@@ -661,10 +690,14 @@ def main(args):
+                     model_name,
+                     image_start=image_start,
+                     image_token_len=image_token_len,
++                    tokenizer=tokenizer,
+                 )
+                 # Mass-preserving caches add log(mass) to the key logits of each layer.
+                 if hasattr(kv_cache, "attach_model"):
+                     kv_cache.attach_model(model)
++                # RehearsalKV replays every question asked so far.
++                if hasattr(kv_cache, "register_question"):
++                    kv_cache.register_question(turn["question"])
+ 
+                 sink = (
+                     kv_cache.observe_layer
+@@ -766,6 +799,8 @@ def main(args):
+                         f"item {item_index}, turn {turn_id}: no new user tokens "
+                         "were added to the conversation."
+                     )
++                if hasattr(kv_cache, "register_question"):
++                    kv_cache.register_question(turn["question"])
+ 
+                 # Send ONLY Q2/Q3/... plus template formatting.  No image and no
+                 # previous question/answer are resent.
+@@ -823,6 +858,11 @@ def main(args):
+                 description=f"item {item_index}, turn {turn_id}, separator",
+             )
+ 
++            # TurnCast-KV separates this turn's question rows from its answer rows
++            # (the separator below belongs to the answer).
++            if hasattr(kv_cache, "begin_answer"):
++                kv_cache.begin_answer()
++
+             if answer_ids.shape[1] == 0:
+                 # Empty answers cannot contribute an answer-token NLL, but the
+                 # template separator still needs to be committed for next turn.
+@@ -1023,8 +1063,25 @@ if __name__ == "__main__":
+             "elastic_cache",
+             "meda",
+             "pyramidkv",
++            "rehearsal_kv",
++            "turncast_kv",
+         ],
+     )
++    # TurnCast-KV (kv_cache_turncast.py): a trained forecaster (turncast/train.py).
++    parser.add_argument("--turncast-scorer", type=str, default=None,
++                        help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
++    parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
++                        help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
++    # RehearsalKV (kv_cache_rehearsal.py).  Only --ratio matters; these exist
++    # for ablations and are NOT tuned.
++    parser.add_argument("--rehearsal-recent-size", type=int, default=8,
++                        help="RehearsalKV: newest entries always kept (SnapKV/PyramidKV standard 8).")
++    parser.add_argument("--rehearsal-acts", type=str, default="revisit,recall,explore,respond",
++                        help="RehearsalKV ablation: comma list from revisit,recall,explore,respond.")
++    parser.add_argument("--rehearsal-allocation", choices=["demand", "uniform"], default="demand",
++                        help="RehearsalKV ablation: layer budgets from rehearsal demand or uniform.")
++    parser.add_argument("--rehearsal-aggregation", choices=["mean", "max"], default="mean",
++                        help="RehearsalKV ablation: act-weighted mean (default) or max over rehearsal tokens (KVzip/Attic-KV style).")
+     parser.add_argument("--ratio", type=float, default=0.9)
+     parser.add_argument("--alpha", type=float, default=1.0,
+                         help="Ordinary-attention weight for multimodal caches.")
+@@ -1100,6 +1157,9 @@ if __name__ == "__main__":
+                         help="PyramidKV: pooling kernel over keys (odd).")
+     parser.add_argument("--pyramid-pooling", choices=["maxpool", "avgpool"], default="maxpool",
+                         help="PyramidKV: score pooling.")
++    parser.add_argument("--pyramid-exact-budget", action="store_true",
++                        help="PyramidKV: keep the pyramid shape but make the total exactly L*C "
++                             "(the original floored slope over-spends by up to (L-1)/2 per layer).")
+     parser.add_argument("--pyramid-beta", type=float, default=20,
+                         help="PyramidKV: top/bottom budget spread; last layer gets M // beta.")
+ 
+diff --git a/eval_rouge_final2.py b/eval_rouge_final2.py
+index 5e801df..5979577 100644
+--- a/eval_rouge_final2.py
++++ b/eval_rouge_final2.py
+@@ -67,6 +67,8 @@ from kv_cache_final import (
+     set_legacy_logical_position_limit,
+ )
+ from kv_cache_coverage import TurnConditionedCoverageKVCache
++from kv_cache_rehearsal import RehearsalKVCache
++from kv_cache_turncast import TurnCastKVCache
+ from tgv_kv_legacy_nova import (
+     enable_online_attention,
+     online_attention,
+@@ -287,9 +289,34 @@ def build_cache(
+     model_name,
+     image_start=None,
+     image_token_len=0,
++    tokenizer=None,
+ ):
+     """Create a fresh cache object for one dataset item/conversation."""
+     layer_num = 32 if "7b" in model_name.lower() else 40
++
++    if args.method == "turncast_kv":
++        # Learned forecast of next-turn attention (kv_cache_turncast.py).
++        return TurnCastKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            scorer_path=getattr(args, "turncast_scorer", None),
++            boundary=getattr(args, "turncast_boundary", "window"),
++            image_start=image_start,
++            image_token_len=image_token_len,
++        )
++
++    if args.method == "rehearsal_kv":
++        return RehearsalKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            start_size=args.start_size,
++            recent_size=getattr(args, "rehearsal_recent_size", 8),
++            tokenizer=tokenizer,
++            acts=tuple(a.strip() for a in getattr(args, "rehearsal_acts", "revisit,recall,explore,respond").split(",") if a.strip()),
++            allocation=getattr(args, "rehearsal_allocation", "demand"),
++            aggregation=getattr(args, "rehearsal_aggregation", "mean"),
++        )
++
+     common = dict(
+         start_size=args.start_size,
+         k_seq_dim=2,
+@@ -394,6 +421,7 @@ def build_cache(
+             kernel_size=args.pyramid_kernel_size,
+             pooling=args.pyramid_pooling,
+             beta=args.pyramid_beta,
++            exact_budget=getattr(args, "pyramid_exact_budget", False),
+         )
+ 
+     if args.method == "local_cache":
+@@ -418,14 +446,16 @@ def apply_cache(kv_cache, past_key_values, num_of_token, attentions):
+ 
+ def prefill_reads_attention(kv_cache):
+     """Every current method except LocalCache scores the prefill."""
+-    return not isinstance(kv_cache, LocalCache)
++    # RehearsalKV scores with its own rehearsal pass, not the prefill attention.
++    return not isinstance(kv_cache, (LocalCache, RehearsalKVCache))
+ 
+ 
+ def decode_reads_attention(kv_cache):
+     """Return whether one-token continuation attention is required."""
+     # LocalCache never reads attention.
+     # ElasticCache scores only the initial prefill.
+-    return not isinstance(kv_cache, (LocalCache, ElasticCache))
++    # RehearsalKV never reads decoding attention.
++    return not isinstance(kv_cache, (LocalCache, ElasticCache, RehearsalKVCache))
+ 
+ def finalize_turn_cache(kv_cache, past_key_values):
+     """Run boundary-only compression for a turn-isolated cache."""
+@@ -583,6 +613,20 @@ def default_experiment_name(args):
+     to the same score/prediction files.
+     """
+     name = f"{args.method}_ratio{args.ratio}"
++    if args.method == "pyramidkv" and args.pyramid_exact_budget:
++        return name + "_exact"
++    if args.method == "turncast_kv":
++        if args.turncast_boundary != "window":
++            name += f"_boundary-{args.turncast_boundary}"
++        return name
++    if args.method == "rehearsal_kv":
++        if args.rehearsal_acts != "revisit,recall,explore,respond":
++            name += "_acts-" + args.rehearsal_acts.replace(",", "+")
++        if args.rehearsal_allocation != "demand":
++            name += f"_alloc-{args.rehearsal_allocation}"
++        if args.rehearsal_aggregation != "mean":
++            name += f"_agg-{args.rehearsal_aggregation}"
++        return name
+     if args.allocation_signal == "sensitivity":
+         name += f"_sens-{args.sensitivity_mode}_sa{args.sens_alpha}"
+     elif args.allocation_signal != "turn":
+@@ -890,10 +934,14 @@ def main(args):
+                     model_name,
+                     image_start=image_start,
+                     image_token_len=image_token_len,
++                    tokenizer=tokenizer,
+                 )
+                 # Mass-preserving caches add log(mass) to the key logits of each layer.
+                 if hasattr(kv_cache, "attach_model"):
+                     kv_cache.attach_model(model)
++                # RehearsalKV replays every question asked so far.
++                if hasattr(kv_cache, "register_question"):
++                    kv_cache.register_question(original_question)
+ 
+                 sink = (
+                     kv_cache.observe_layer
+@@ -986,6 +1034,8 @@ def main(args):
+                         f"item {item_index}, turn {turn_id}: no new user tokens "
+                         "were added to the conversation."
+                     )
++                if hasattr(kv_cache, "register_question"):
++                    kv_cache.register_question(original_question)
+ 
+                 # Send ONLY Q2/Q3/... plus template formatting.  No image and no
+                 # previous question/answer are resent.
+@@ -1004,6 +1054,10 @@ def main(args):
+                         f"new user/template tokens={new_turn_ids.shape[1]}"
+                     )
+ 
++            # TurnCast-KV separates this turn's question rows from its answer rows.
++            if hasattr(kv_cache, "begin_answer"):
++                kv_cache.begin_answer()
++
+             # ============================================================
+             # 2. Generate the assistant answer into the continuing cache.
+             # ============================================================
+@@ -1327,8 +1381,25 @@ if __name__ == "__main__":
+             "elastic_cache",
+             "meda",
+             "pyramidkv",
++            "rehearsal_kv",
++            "turncast_kv",
+         ],
+     )
++    # TurnCast-KV (kv_cache_turncast.py): a trained forecaster (turncast/train.py).
++    parser.add_argument("--turncast-scorer", type=str, default=None,
++                        help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
++    parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
++                        help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
++    # RehearsalKV (kv_cache_rehearsal.py).  Only --ratio matters; these exist
++    # for ablations and are NOT tuned.
++    parser.add_argument("--rehearsal-recent-size", type=int, default=8,
++                        help="RehearsalKV: newest entries always kept (SnapKV/PyramidKV standard 8).")
++    parser.add_argument("--rehearsal-acts", type=str, default="revisit,recall,explore,respond",
++                        help="RehearsalKV ablation: comma list from revisit,recall,explore,respond.")
++    parser.add_argument("--rehearsal-allocation", choices=["demand", "uniform"], default="demand",
++                        help="RehearsalKV ablation: layer budgets from rehearsal demand or uniform.")
++    parser.add_argument("--rehearsal-aggregation", choices=["mean", "max"], default="mean",
++                        help="RehearsalKV ablation: act-weighted mean (default) or max over rehearsal tokens (KVzip/Attic-KV style).")
+     parser.add_argument(
+         "--ratio",
+         type=float,
+@@ -1440,6 +1511,9 @@ if __name__ == "__main__":
+                         help="PyramidKV: pooling kernel over keys (odd).")
+     parser.add_argument("--pyramid-pooling", choices=["maxpool", "avgpool"], default="maxpool",
+                         help="PyramidKV: score pooling.")
++    parser.add_argument("--pyramid-exact-budget", action="store_true",
++                        help="PyramidKV: keep the pyramid shape but make the total exactly L*C "
++                             "(the original floored slope over-spends by up to (L-1)/2 per layer).")
+     parser.add_argument("--pyramid-beta", type=float, default=20,
+                         help="PyramidKV: top/bottom budget spread; last layer gets M // beta.")
+ 
+diff --git a/kv_cache_pyramidkv.py b/kv_cache_pyramidkv.py
+index 02de502..af8a269 100644
+--- a/kv_cache_pyramidkv.py
++++ b/kv_cache_pyramidkv.py
+@@ -72,6 +72,7 @@ class PyramidKVCache:
+         kernel_size=7,
+         pooling="maxpool",
+         beta=20,
++        exact_budget=False,
+     ):
+         self.k_seq_dim = int(k_seq_dim)
+         self.v_seq_dim = int(v_seq_dim)
+@@ -81,6 +82,13 @@ class PyramidKVCache:
+         self.kernel_size = int(kernel_size)
+         self.pooling = str(pooling)
+         self.beta = float(beta)
++        # The KVCache-Factory schedule floors its per-layer step, so the
++        # realized average exceeds C by up to (L - 1) / 2 entries per layer
++        # (about +10-17% at ratio 0.9 for LLaVA-1.5-7B).  exact_budget keeps
++        # the same linear pyramid but makes the total exactly L * C, which is
++        # the budget every other method in this repo uses.  Default False
++        # reproduces the original schedule.
++        self.exact_budget = bool(exact_budget)
+ 
+         if self.k_seq_dim != 2 or self.v_seq_dim != 2:
+             raise ValueError("PyramidKVCache expects KV layout [batch, heads, seq, dim]")
+@@ -179,6 +187,17 @@ class PyramidKVCache:
+         if max_num >= q_len - window:
+             max_num = q_len - window
+             min_num = past_average * 2 - max_num
++        if self.exact_budget:
++            # Same linear pyramid with an exact float slope; largest-remainder
++            # rounding makes the integer budgets sum to L * past_average.
++            slope = (max_num - min_num) / (self.layer_num - 1)
++            exact = [max_num - layer_idx * slope for layer_idx in range(self.layer_num)]
++            caps = [int(x) for x in exact]
++            missing = past_average * self.layer_num - sum(caps)
++            order = sorted(range(self.layer_num), key=lambda i: exact[i] - caps[i], reverse=True)
++            for layer_idx in order[:max(0, missing)]:
++                caps[layer_idx] += 1
++            return caps
+         steps = (max_num - min_num) // (self.layer_num - 1)
+         return [max_num - layer_idx * steps for layer_idx in range(self.layer_num)]
+ 
+diff --git a/kv_cache_rehearsal.py b/kv_cache_rehearsal.py
+new file mode 100644
+index 0000000..cc140e3
+--- /dev/null
++++ b/kv_cache_rehearsal.py
+@@ -0,0 +1,467 @@
++"""
++RehearsalKV: anticipatory KV-cache eviction for multi-turn VLM conversations.
++
++Idea
++----
++Every eviction method in this repo decides what to keep by looking BACKWARD:
++attention that already happened (H2O / MEDA / turn-conditioned), the last few
++tokens of the prompt or of the answer (PyramidKV / SnapKV), or text-to-image
++attention of the current question (TGV-KV).  In a conversation, however, the
++cache is compressed for a question that has NOT been asked yet.  Whatever is
++evicted at Turn 1 is gone for Turns 2, 3, 4.
++
++RehearsalKV decides by looking FORWARD.  Right before each compression the
++model REHEARSES the next user turn: a short synthetic user message is placed
++at exactly the logical position where the real next turn will start, it is
++run through the model once (teacher-forced, no generation), and its queries
++show which cached entries the next turn is likely to read.  Those entries are
++kept, everything else is evicted, and the rehearsal's own KV is thrown away.
++
++The rehearsal is built from four dialogue acts, which are the things a follow-up
++question can do:
++
++    REVISIT  re-ask every user question so far (Q1 ... Qt)
++             -> follow-ups and clarifications on ANY earlier topic, not only Q1
++    RECALL   "Summarize our conversation so far."  (omitted before Turn-1 answer)
++             -> references to what the assistant already said
++    EXPLORE  "Describe the image in detail."
++             -> questions about image content nobody has asked about yet
++    RESPOND  the closing " ASSISTANT:" template tokens
++             -> the state from which the next answer will be generated
++
++Each act gets equal weight (its tokens are averaged, then acts are averaged),
++so a long question cannot drown out the others.  As the conversation grows,
++REVISIT holds more questions, so the generic EXPLORE prior automatically gets
++a smaller share (1 / number_of_acts).
++
++Two details matter in this repo's protocol:
++
++* At the Turn-1 prefill the prompt is "USER: Q1\\n<image> ASSISTANT:".  Q1
++  comes BEFORE the image, so under causal attention Q1's tokens never see the
++  image, and PyramidKV's 8-token window is 3 image tokens + " ASSISTANT:".
++  The rehearsal replays Q1 AFTER the image, so the question can actually look
++  at the image when the Turn-1 compression (which decides the visual tokens for
++  the whole conversation) is made.
++* The rehearsal sits at the future logical position, so its RoPE distances to
++  the cached entries are the ones the real next turn will have.
++
++Budget
++------
++Same as every other method here: an average of C = int(logical_len * (1 - ratio))
++entries per layer at each compression point.  Compression happens at the same
++two points as PyramidKV and MEDA: right after the Turn-1 multimodal prefill and
++at every turn boundary (``finalize_turn``).  Inside a turn tokens are appended.
++
++Layer allocation is read off the rehearsal as well: each layer's evictable
++budget is proportional to the rehearsal attention mass that falls on evictable
++entries in that layer ("demand").  Proportional allocation maximizes
++sum_l demand_l * log(budget_l), i.e. diminishing returns per layer; no pyramid
++slope or calibration profile is needed.
++
++Selection is per KV head (each head keeps its own positions, same count per
++layer), with the attention-sink prefix (``start_size``) and the ``recent_size``
++newest entries always kept.
++
++Hyperparameters
++---------------
++Only ``ratio`` (shared with all methods).  ``start_size`` = 1 and
++``recent_size`` = 8 are the repo's / SnapKV's standard protected sizes and are
++not tuned.  The two generic sentences are fixed.  No pooling kernel, no window
++size, no pyramid beta, no score weights, no sensitivity calibration.
++
++Cost
++----
++One extra forward pass of a few dozen tokens per compression (the prefill and
++each turn boundary).  In exchange, no attention maps are needed during the
++prefill or during decoding, so the evaluator runs those passes with
++``output_attentions=False``.
++
++Related work
++------------
++Rehearsal-style scoring exists for text: KVzip (rereads the whole context),
++Attic-KV (generates self-quiz question-answer pairs, arXiv 2610.12133),
++EpiCache (replays medoid history segments per episode), LAQ (generates pseudo
++answers) and DapQ (positional placeholders).  RehearsalKV differs in what it
++rehearses (the next user turn of a conversation, built from dialogue acts and
++the conversation's own questions), in needing no generation (one teacher-forced
++pass of tens of tokens), in being repeated at every turn of a multimodal
++conversation, and in reading layer budgets off the same pass.
++``aggregation="max"`` gives the KVzip / Attic-KV style peak aggregation as an
++ablation of the default act-weighted mean.
++
++Interface (used by eval_rouge_final2.py / eval_ppl_final.py)
++-----------------------------------------------------------
++    cache = RehearsalKVCache(layer_num=..., ratio=..., tokenizer=tokenizer)
++    cache.attach_model(model)            # evaluator already does this
++    cache.register_question(q_text)      # once per turn, before its tokens
++    past = cache(past, num_of_token, attentions=None)  # after every forward
++    past = cache.finalize_turn(past)     # at every turn boundary
++"""
++
++import torch
++
++from tgv_kv_legacy_nova import online_attention, set_legacy_logical_position_limit
++
++
++EXPLORE_TEXT = "Describe the image in detail."
++RECALL_TEXT = "Summarize our conversation so far."
++ALL_ACTS = ("revisit", "recall", "explore", "respond")
++
++
++class RehearsalKVCache:
++    """Anticipatory multi-turn eviction: keep what a rehearsed next turn reads."""
++
++    def __init__(
++        self,
++        layer_num,
++        ratio=0.0,
++        start_size=1,
++        recent_size=8,
++        k_seq_dim=2,
++        v_seq_dim=2,
++        tokenizer=None,
++        user_role="USER",
++        assistant_role="ASSISTANT",
++        acts=ALL_ACTS,
++        allocation="demand",
++        aggregation="mean",
++    ):
++        self.layer_num = int(layer_num)
++        self.ratio = float(ratio)
++        self.start_size = int(start_size)
++        self.recent_size = int(recent_size)
++        self.k_seq_dim = int(k_seq_dim)
++        self.v_seq_dim = int(v_seq_dim)
++        self.tokenizer = tokenizer
++        self.user_role = str(user_role)
++        self.assistant_role = str(assistant_role)
++        self.acts = tuple(acts)
++        self.allocation = str(allocation)
++        # "mean": act-weighted expected attention (the designed default).
++        # "max": peak attention over rehearsal tokens and grouped query heads,
++        # the aggregation used by KVzip / Attic-KV (ablation).
++        self.aggregation = str(aggregation)
++        if self.aggregation not in {"mean", "max"}:
++            raise ValueError("aggregation must be 'mean' or 'max'")
++
++        if self.k_seq_dim != 2 or self.v_seq_dim != 2:
++            raise ValueError("RehearsalKVCache expects KV layout [batch, heads, seq, dim]")
++        if not 0.0 <= self.ratio < 1.0:
++            raise ValueError("ratio must satisfy 0 <= ratio < 1")
++        if self.start_size < 0 or self.recent_size < 1:
++            raise ValueError("start_size must be >= 0 and recent_size >= 1")
++        unknown = set(self.acts) - set(ALL_ACTS)
++        if unknown or not self.acts:
++            raise ValueError(f"acts must be a non-empty subset of {ALL_ACTS}")
++        if self.allocation not in {"demand", "uniform"}:
++            raise ValueError("allocation must be 'demand' or 'uniform'")
++
++        self.model = None
++        self.reset()
++
++    # ------------------------------------------------------------------
++    # State
++    # ------------------------------------------------------------------
++    def reset(self):
++        """Reset all state at the beginning of a NEW dataset conversation."""
++        self.questions = []          # raw text of every user question so far
++        self.latest_logical_len = None
++        self.turn_index = 0
++        self._prefilled = False
++        self._scores = None          # per layer: [kv_heads, length] rehearsal scores
++        self._demand = None          # per layer: scalar, rehearsal mass on evictable keys
++        self._weights = None         # [probe_len] per-token act weights
++        self._kv_lengths = None
++        self.last_layer_budgets = None
++        self.last_finalize_stats = None
++
++    def attach_model(self, model):
++        """The rehearsal needs the model to run one teacher-forced pass."""
++        self.model = model
++
++    def attach_tokenizer(self, tokenizer):
++        self.tokenizer = tokenizer
++
++    def register_question(self, question):
++        """Record the raw user question of the turn that is starting."""
++        text = (question or "").replace("<image>", " ").strip()
++        if text:
++            self.questions.append(" ".join(text.split()))
++
++    # ------------------------------------------------------------------
++    # Rehearsal construction
++    # ------------------------------------------------------------------
++    def _encode(self, text):
++        return list(self.tokenizer(text, add_special_tokens=False).input_ids)
++
++    def _build_rehearsal(self, stage, device):
++        """Token ids of the synthetic next user turn and per-token act weights.
++
++        Layout (LLaVA v1 roles), one user message with one line per act:
++
++            [</s>] USER: <Q1>\\n<Q2>\\n ... <Qt>\\n<RECALL>\\n<EXPLORE> ASSISTANT:
++
++        "</s>" closes the still-open assistant turn at the Turn-1 prefill; at a
++        turn boundary the separator is already in the cache.
++        """
++        if self.tokenizer is None:
++            raise RuntimeError("RehearsalKVCache needs a tokenizer (pass tokenizer=...).")
++
++        ids, act_of_token = [], []
++
++        def add(token_ids, act):
++            ids.extend(token_ids)
++            act_of_token.extend([act] * len(token_ids))
++
++        if stage == "prefill":
++            eos = self.tokenizer.eos_token_id
++            if eos is not None:
++                add([int(eos)], None)
++        add(self._encode(f"{self.user_role}:"), None)
++
++        if "revisit" in self.acts:
++            for index, question in enumerate(self.questions):
++                add(self._encode(" " + question + "\n"), f"revisit{index}")
++        if "recall" in self.acts and stage != "prefill":
++            add(self._encode(" " + RECALL_TEXT + "\n"), "recall")
++        if "explore" in self.acts:
++            add(self._encode(" " + EXPLORE_TEXT), "explore")
++        respond_ids = self._encode(f" {self.assistant_role}:")
++        add(respond_ids, "respond" if "respond" in self.acts else None)
++
++        # Every act gets total weight 1 / (number of acts), shared by its tokens.
++        counts = {}
++        for act in act_of_token:
++            if act is not None:
++                counts[act] = counts.get(act, 0) + 1
++        if not counts:
++            raise RuntimeError("The rehearsal has no scored tokens.")
++        weights = [
++            0.0 if act is None else 1.0 / (len(counts) * counts[act])
++            for act in act_of_token
++        ]
++        probe = torch.tensor([ids], dtype=torch.long, device=device)
++        weights = torch.tensor(weights, dtype=torch.float32, device=device)
++        return probe, weights, sorted(counts)
++
++    # ------------------------------------------------------------------
++    # Rehearsal attention -> per-head scores (one layer at a time)
++    # ------------------------------------------------------------------
++    def _protected_bounds(self, length):
++        start = min(self.start_size, length)
++        end = max(start, length - self.recent_size)
++        return start, end
++
++    def _rehearsal_sink(self, layer_idx, attention):
++        """Reduce one layer's rehearsal attention to per-KV-head key scores."""
++        if attention.dim() != 4 or attention.shape[0] != 1:
++            raise RuntimeError(
++                f"Expected [1, heads, queries, keys], got {tuple(attention.shape)}"
++            )
++        length = self._kv_lengths[layer_idx]
++        probe_len = attention.shape[-2]
++        if attention.shape[-1] != length + probe_len:
++            raise RuntimeError(
++                f"Rehearsal layer {layer_idx}: attention covers {attention.shape[-1]} "
++                f"keys, expected {length} cached + {probe_len} rehearsal keys."
++            )
++        # Attention mass from each rehearsal token to each CACHED entry
++        # (rehearsal-to-rehearsal attention is not about the cache).
++        to_cache = attention[0, :, :, :length].float()                 # [H, P, S]
++        expected = torch.einsum("hps,p->hs", to_cache, self._weights)  # [H, S]
++        kv_heads = self._kv_heads[layer_idx]
++        if expected.shape[0] != kv_heads:
++            # GQA: average the query heads that share a KV head.
++            expected = expected.view(kv_heads, -1, length).mean(dim=1)
++        start, end = self._protected_bounds(length)
++        # Demand (layer budget) is always the expected rehearsal mass.
++        self._demand[layer_idx] = expected[:, start:end].sum(dim=-1).mean()
++        if self.aggregation == "max":
++            scored = to_cache[:, self._weights > 0, :].amax(dim=1)     # [H, S]
++            if scored.shape[0] != kv_heads:
++                scored = scored.view(kv_heads, -1, length).amax(dim=1)
++            self._scores[layer_idx] = scored
++        else:
++            self._scores[layer_idx] = expected
++
++    def _rehearse(self, past_key_values, stage):
++        if self.model is None:
++            raise RuntimeError("RehearsalKVCache needs attach_model(model) before use.")
++        device = past_key_values[0][0].device
++        probe, self._weights, acts = self._build_rehearsal(stage, device)
++        probe_len = probe.shape[1]
++
++        self._kv_lengths = [k.size(self.k_seq_dim) for k, _ in past_key_values]
++        self._kv_heads = [k.size(1) for k, _ in past_key_values]
++        self._scores = [None] * self.layer_num
++        self._demand = [None] * self.layer_num
++
++        # The rehearsal occupies the logical positions the next turn will use.
++        position_ids = torch.arange(
++            self.latest_logical_len,
++            self.latest_logical_len + probe_len,
++            dtype=torch.long,
++            device=device,
++        ).unsqueeze(0)
++        set_legacy_logical_position_limit(self.model, self.latest_logical_len + probe_len)
++
++        # Only attention is needed, so run the decoder stack without the LM head.
++        decoder = self.model.get_model() if hasattr(self.model, "get_model") else self.model.model
++        with torch.no_grad(), online_attention(self.model, self._rehearsal_sink):
++            # use_cache=False: the rehearsal's own K/V are never stored, so the
++            # real cache is left exactly as it was.
++            decoder(
++                input_ids=probe,
++                position_ids=position_ids,
++                past_key_values=past_key_values,
++                use_cache=False,
++                output_attentions=True,
++            )
++
++        missing = [i for i, s in enumerate(self._scores) if s is None]
++        if missing:
++            raise RuntimeError(f"Rehearsal produced no attention for layers {missing}.")
++        return probe_len, acts
++
++    # ------------------------------------------------------------------
++    # Budgets
++    # ------------------------------------------------------------------
++    @staticmethod
++    def _bounded_largest_remainder(total, weights, upper):
++        """Integer allocation summing to ``total`` with 0 <= a_l <= upper_l."""
++        upper = upper.to(torch.long)
++        total = max(0, min(int(total), int(upper.sum())))
++        allocation = torch.zeros_like(upper)
++        remaining = total
++        weights = weights.double().clamp_min(0)
++        while remaining > 0:
++            capacity = upper - allocation
++            active = capacity > 0
++            if not active.any():
++                break
++            active_weights = weights * active
++            if active_weights.sum() <= 0:
++                active_weights = active.double()
++            quota = remaining * active_weights / active_weights.sum()
++            add = torch.minimum(torch.floor(quota).long(), capacity)
++            if add.sum() == 0:
++                order = torch.argsort(quota - torch.floor(quota), descending=True)
++                for idx in order.tolist():
++                    if remaining == 0:
++                        break
++                    if capacity[idx] > 0:
++                        add[idx] += 1
++                        remaining -= 1
++                allocation += add
++                continue
++            allocation += add
++            remaining -= int(add.sum())
++        return allocation
++
++    def _layer_budgets(self):
++        """Evictable-entry budget per layer (protected entries come on top)."""
++        lengths = torch.tensor(self._kv_lengths, dtype=torch.long)
++        protected = torch.tensor(
++            [min(n, self.start_size + self.recent_size) for n in self._kv_lengths],
++            dtype=torch.long,
++        )
++        candidates = lengths - protected
++        target = max(1, int(self.latest_logical_len * (1.0 - self.ratio)))
++        evictable_total = max(0, target * self.layer_num - int(protected.sum()))
++        if self.allocation == "uniform":
++            demand = torch.ones(self.layer_num, dtype=torch.float64)
++        else:
++            demand = torch.stack(self._demand).double().cpu()
++            if not torch.isfinite(demand).all() or demand.sum() <= 0:
++                demand = torch.ones(self.layer_num, dtype=torch.float64)
++        keep = self._bounded_largest_remainder(evictable_total, demand, candidates)
++        return keep, target, demand
++
++    # ------------------------------------------------------------------
++    # Compression
++    # ------------------------------------------------------------------
++    def _compress(self, past_key_values, stage):
++        lengths = [k.size(self.k_seq_dim) for k, _ in past_key_values]
++        target = max(1, int(self.latest_logical_len * (1.0 - self.ratio)))
++        if sum(lengths) <= target * self.layer_num:
++            self.last_finalize_stats = {
++                "stage": stage, "turn": self.turn_index + 1,
++                "logical_len": int(self.latest_logical_len),
++                "target_per_layer": int(target), "regime": "keep_all",
++                "kv_before_layer0": int(lengths[0]),
++            }
++            return past_key_values
++
++        probe_len, acts = self._rehearse(past_key_values, stage)
++        keep, target, demand = self._layer_budgets()
++
++        new_past, kept = [], []
++        for layer_idx, (k, v) in enumerate(past_key_values):
++            length = lengths[layer_idx]
++            n_keep = int(keep[layer_idx])
++            start, end = self._protected_bounds(length)
++            if n_keep >= end - start:
++                new_past.append([k, v])
++                kept.append(length)
++                continue
++
++            kv_heads = k.shape[1]
++            scores = self._scores[layer_idx][:, start:end]               # [H, cand]
++            if n_keep > 0:
++                top = scores.topk(n_keep, dim=-1).indices.sort(dim=-1).values + start
++            else:
++                top = torch.empty(kv_heads, 0, dtype=torch.long, device=scores.device)
++            prefix = torch.arange(start, device=top.device).expand(kv_heads, -1)
++            recent = torch.arange(end, length, device=top.device).expand(kv_heads, -1)
++            index = torch.cat([prefix, top, recent], dim=-1).to(k.device)  # [H, keep]
++            index = index[None, :, :, None]
++            k_new = k.gather(self.k_seq_dim, index.expand(k.shape[0], -1, -1, k.shape[-1]))
++            v_new = v.gather(self.v_seq_dim, index.expand(v.shape[0], -1, -1, v.shape[-1]))
++            new_past.append([k_new, v_new])
++            kept.append(k_new.size(self.k_seq_dim))
++
++        self.last_layer_budgets = kept
++        self.last_finalize_stats = {
++            "stage": stage,
++            "turn": self.turn_index + 1,
++            "logical_len": int(self.latest_logical_len),
++            "target_per_layer": int(target),
++            "rehearsal_tokens": int(probe_len),
++            "rehearsal_acts": acts,
++            "kv_before_layer0": int(lengths[0]),
++            "kv_after_first": int(kept[0]),
++            "kv_after_last": int(kept[-1]),
++            "kv_after_mean": float(sum(kept) / len(kept)),
++            "layer_budgets": kept,
++            "layer_demand": [round(float(x), 4) for x in demand.tolist()],
++        }
++        # Free the rehearsal statistics; nothing is carried to the next turn.
++        self._scores = self._demand = self._weights = None
++        return new_past
++
++    # ------------------------------------------------------------------
++    # Evaluator interface
++    # ------------------------------------------------------------------
++    def __call__(self, past_key_values, num_of_token=None, attentions=None):
++        if past_key_values is None:
++            return None
++        if num_of_token is None:
++            raise ValueError("RehearsalKVCache requires num_of_token for ratio-based pruning.")
++        self.latest_logical_len = int(num_of_token)
++
++        # The first call follows the Turn-1 multimodal prefill: compress now so
++        # the Turn-1 answer is generated under the budget.
++        if not self._prefilled:
++            self._prefilled = True
++            return self._compress(past_key_values, stage="prefill")
++
++        # Within a turn: append only.
++        return past_key_values
++
++    def finalize_turn(self, past_key_values):
++        """Rehearse the next turn and compress at the turn boundary."""
++        if past_key_values is None or not self._prefilled:
++            return past_key_values
++        result = self._compress(past_key_values, stage="turn_boundary")
++        self.turn_index += 1
++        return result
+diff --git a/kv_cache_turncast.py b/kv_cache_turncast.py
+new file mode 100644
+index 0000000..b5a3292
+--- /dev/null
++++ b/kv_cache_turncast.py
+@@ -0,0 +1,671 @@
++"""
++TurnCast-KV: a learned forecast of what the whole conversation will read,
++used where multi-turn KV eviction is decided.
++
++Problem
++-------
++In LLaVA's multi-turn protocol the cache is compressed right after the Turn-1
++prefill ("USER: Q1\n<image> ASSISTANT:") and at every turn boundary, always
++BEFORE the next question exists.  The Turn-1 compression decides which of the
++576 visual tokens survive for the WHOLE conversation.  PyramidKV decides it with
++the attention of the last 8 prompt tokens; because Q1 comes before the image,
++those 8 rows are 3 image patches and " ASSISTANT:", and none of them knows what
++the later turns will ask.
++
++Idea
++----
++Train a tiny model to FORECAST the attention that the rest of the conversation
++(the Turn-1 answer and every later turn) will pay to each cached entry, from
++signals that are free at the compression point:
++
++  * the attention each entry already received in this turn (question rows and
++    answer rows separately) and from the last 8 rows (PyramidKV's window);
++  * the strongest attention it received in any earlier turn;
++  * the same signals averaged over the layer's heads and over all layers;
++  * the same signals max-pooled over neighbours (3x3 on the image grid, +-3 text tokens);
++  * key and value norms;
++  * structure: segment (sink / prompt text / image / user / assistant), turn
++    age, recency, image-grid position.
++
++The forecaster is a 2-layer MLP (64 hidden units; ~15k parameters for LLaVA-7B,
++8k of them a per-(layer, head) embedding).  It is trained by distillation from the
++frozen LLM: one teacher-forced pass over 200 conversations per dataset gives
++the inputs above and the target, i.e. the attention the REAL later turns paid
++(turncast/collect.py, turncast/train.py).  Nothing extra is generated or run at
++inference.
++
++Where it is used (``boundary``)
++-------------------------------
++  * Turn-1 compression: always the forecaster.  Every KV head keeps its top-B_l
++    entries; B_l follows PyramidKV's linear pyramid with an exact total of
++    L * C, C = int(logical_len * (1 - ratio)); the attention sink is kept.
++  * Turn boundaries: ``boundary="window"`` (default) applies PyramidKV's rule
++    (maxpool-7 of the last-8-row attention, newest 8 kept) with the same
++    budgets; ``boundary="forecast"`` uses the forecaster there too.
++    In the CPU test the forecast won by a wide margin at the Turn-1 compression
++    but lost at turn boundaries: even the TRUE future attention (an oracle)
++    under-protected the just-finished answer, which later turns copy from.
++    Run both on LLaVA (run-job-turncast) before fixing the default.
++
++Cost
++----
++Same model passes and attention reads as PyramidKV.  Decoding attention rows are
++appended to a list and folded every 32 tokens.  By default the forecaster runs
++once per conversation (Turn-1 compression: L * H * S ~ 0.67M entries for
++LLaVA-7B, ~9 GFLOPs, less than one decoding step).
++
++Interface (used by eval_rouge_final2.py / eval_ppl_final.py / eval_efficiency.py)
++------------------------------------------------------------------------------
++    cache = TurnCastKVCache(layer_num, ratio, scorer_path=..., image_start=..., image_token_len=...)
++    cache.register_question(q_text)   # once per turn, before its tokens
++    cache.begin_answer()              # once per turn, before the answer tokens
++    past = cache(past, num_of_token, attentions)   # after every forward
++    past = cache.finalize_turn(past)               # at every turn boundary
++"""
++
++import math
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++from kv_cache_pyramidkv import PyramidKVCache
++
++
++EPS = 1e-4
++LOG_EPS = math.log(EPS)
++WINDOW = 8          # PyramidKV's observation window; used here as one input signal
++FOLD_EVERY = 32     # decoding rows are folded into the running sums in chunks
++SEGMENTS = ("sink", "prompt_text", "image", "user", "assistant")
++SEG_ID = {name: index for index, name in enumerate(SEGMENTS)}
++FEATURE_NAMES = (
++    "q", "a", "w", "h",
++    "q_has", "a_has", "h_has",
++    "pool_q", "pool_a", "pool_w",
++    "layer_q", "layer_a", "layer_w", "layer_h",
++    "global_q", "global_a", "global_w", "global_h",
++    "key_norm", "value_norm",
++    "seg_sink", "seg_prompt_text", "seg_image", "seg_user", "seg_assistant",
++    "age", "current_turn", "recency",
++    "img_row", "img_col", "img_radius",
++)
++FEATURE_VERSION = 1
++
++
++# ----------------------------------------------------------------------
++# Running attention statistics of one layer (shared by the online cache and
++# by the offline collector, so training and inference see identical inputs)
++# ----------------------------------------------------------------------
++class LayerStats:
++    """Attention received by every cached entry of one layer, per KV head.
++
++    q_sum / q_cnt: attention from the current turn's question rows (for Turn 1:
++                   the whole multimodal prompt), counted only over rows that
++                   come AFTER the entry (an entry's attention to itself is not
++                   evidence of importance).
++    a_sum / a_cnt: the same for the current turn's answer rows.
++    hist:          max over finished turns of log(S * turn-mean attention).
++    window:        the last <= WINDOW rows since the previous compression.
++    pos:           logical (RoPE) position of each physical entry.
++    """
++
++    def __init__(self, heads, device, capacity=1024):
++        self.heads = int(heads)
++        self.device = device
++        self.n = 0
++        self.phase = "q"
++        self.track_turns = True     # False: only the window and positions are kept (cheaper)
++        self.window = []
++        self._pending = []
++        self._pending_pos = []
++        self._alloc(max(16, int(capacity)))
++
++    # -- storage -------------------------------------------------------
++    def _new(self, capacity, fill, dtype=torch.float32):
++        return torch.full((self.heads, capacity), fill, dtype=dtype, device=self.device)
++
++    def _alloc(self, capacity):
++        self.cap = capacity
++        self.q_sum = self._new(capacity, 0.0)
++        self.q_cnt = self._new(capacity, 0.0)
++        self.a_sum = self._new(capacity, 0.0)
++        self.a_cnt = self._new(capacity, 0.0)
++        self.hist = self._new(capacity, float("-inf"))
++        self.pos = self._new(capacity, 0, torch.long)
++
++    _FIELDS = (("q_sum", 0.0), ("q_cnt", 0.0), ("a_sum", 0.0), ("a_cnt", 0.0),
++               ("hist", float("-inf")), ("pos", 0))
++
++    def _ensure(self, n):
++        if n <= self.cap:
++            return
++        capacity = max(n, 2 * self.cap)
++        for name, fill in self._FIELDS:
++            old = getattr(self, name)
++            new = self._new(capacity, fill, old.dtype)
++            new[:, : self.n] = old[:, : self.n]
++            setattr(self, name, new)
++        self.cap = capacity
++
++    # -- adding attention rows --------------------------------------------
++    def add_block(self, rows, positions):
++        """rows: [H, R, K] attention of the R newest entries (as queries) to all K
++        entries (causal, so row r sees entries 0 .. K-R+r).  positions: [R]."""
++        heads, count, keys = rows.shape
++        start = keys - count
++        if start != self.n:
++            raise RuntimeError(f"LayerStats: expected {self.n} existing entries, got {start}")
++        self._ensure(keys)
++        self.pos[:, start:keys] = positions.to(self.device).view(1, -1)
++        rows = rows.float()
++        received = rows.sum(dim=1)
++        received[:, start:] -= rows[:, :, start:].diagonal(dim1=1, dim2=2)
++        seen = (keys - 1 - torch.arange(keys, device=self.device)).clamp(min=0, max=count)
++        if self.phase == "q":
++            self.q_sum[:, :keys] += received
++            self.q_cnt[:, :keys] += seen.float()
++        else:
++            self.a_sum[:, :keys] += received
++            self.a_cnt[:, :keys] += seen.float()
++        for r in range(max(0, count - WINDOW), count):
++            self.window.append(rows[:, r, : start + r + 1].clone())
++        del self.window[:-WINDOW]
++        self.n = keys
++
++    def add_row(self, row, position):
++        """One decoding row [H, K] (K = entries after this token).  Folded lazily."""
++        if row.shape[-1] != self.n + len(self._pending_pos) + 1:
++            raise RuntimeError(
++                f"LayerStats: decoding row covers {row.shape[-1]} keys, expected "
++                f"{self.n + len(self._pending_pos) + 1}")
++        if self.track_turns:
++            self._pending.append(row)
++        self._pending_pos.append(int(position))
++        self.window.append(row)
++        if len(self.window) > WINDOW:
++            self.window.pop(0)
++        if len(self._pending_pos) >= FOLD_EVERY:
++            self.fold()
++
++    def fold(self):
++        if not self._pending_pos:
++            return
++        if not self.track_turns:
++            start, count = self.n, len(self._pending_pos)
++            self._ensure(start + count)
++            self.pos[:, start:start + count] = torch.tensor(self._pending_pos, device=self.device).view(1, -1)
++            self.n += count
++            self._pending_pos = []
++            return
++        keys = self._pending[-1].shape[-1]
++        block = torch.stack([F.pad(r, (0, keys - r.shape[-1])) for r in self._pending], dim=1)
++        positions = torch.tensor(self._pending_pos, dtype=torch.long)
++        self._pending, self._pending_pos = [], []
++        window, self.window = self.window, []
++        self.add_block(block, positions)
++        self.window = window          # these rows are already in the window, in order
++
++    def set_phase(self, phase):
++        self.fold()
++        self.phase = phase
++
++    # -- boundary operations ----------------------------------------------
++    def snapshot(self, size):
++        """Per-head log features of the current entries (size = entries in this layer)."""
++        self.fold()
++        n = self.n
++        scale = float(size)
++        q_has = self.q_cnt[:, :n] > 0
++        a_has = self.a_cnt[:, :n] > 0
++        q = torch.log(scale * self.q_sum[:, :n] / self.q_cnt[:, :n].clamp(min=1.0) + EPS)
++        a = torch.log(scale * self.a_sum[:, :n] / self.a_cnt[:, :n].clamp(min=1.0) + EPS)
++        w_sum = torch.zeros(self.heads, n, device=self.device)
++        w_cnt = torch.zeros(n, device=self.device)
++        for row in self.window:
++            visible = row.shape[-1] - 1          # entries strictly before this row's token
++            w_sum[:, :visible] += row[:, :visible].float()
++            w_cnt[:visible] += 1
++        w = torch.log(scale * w_sum / w_cnt.clamp(min=1.0) + EPS)
++        h_has = torch.isfinite(self.hist[:, :n])
++        h = torch.where(h_has, self.hist[:, :n], torch.full_like(self.hist[:, :n], LOG_EPS))
++        return {"q": q, "a": a, "w": w, "h": h, "q_has": q_has, "a_has": a_has,
++                "h_has": h_has, "pos": self.pos[:, :n].clone()}
++
++    def end_turn(self, size):
++        """Fold the finished turn into hist and clear the per-turn sums."""
++        self.fold()
++        n = self.n
++        cnt = self.q_cnt[:, :n] + self.a_cnt[:, :n]
++        mean = (self.q_sum[:, :n] + self.a_sum[:, :n]) / cnt.clamp(min=1.0)
++        value = torch.log(float(size) * mean + EPS)
++        self.hist[:, :n] = torch.where(cnt > 0, torch.maximum(self.hist[:, :n], value), self.hist[:, :n])
++        for name in ("q_sum", "q_cnt", "a_sum", "a_cnt"):
++            getattr(self, name)[:, :n] = 0.0
++        self.phase = "q"
++
++    def reset_window(self):
++        self.fold()
++        self.window = []
++
++    def gather(self, index):
++        """Keep the entries index [H, keep] (per head)."""
++        self.fold()
++        keep = index.shape[1]
++        index = index.to(self.device)
++        capacity = keep + 256
++        for name, fill in self._FIELDS:
++            old = getattr(self, name)
++            new = self._new(capacity, fill, old.dtype)
++            new[:, :keep] = old[:, : self.n].gather(1, index)
++            setattr(self, name, new)
++        self.cap = capacity
++        self.n = keep
++        self.window = []
++
++
++# ----------------------------------------------------------------------
++# Features (shared by online inference and offline training)
++# ----------------------------------------------------------------------
++def layer_consensus(snap, n_logical):
++    """Mean over this layer's heads of q/a/w/h at each logical position.
++
++    Returns ([4, N] values, [N] presence)."""
++    pos = snap["pos"]
++    values = torch.stack([snap["q"], snap["a"], snap["w"], snap["h"]])       # [4, H, S]
++    total = torch.zeros(4, n_logical, device=pos.device)
++    total.scatter_add_(1, pos.reshape(1, -1).expand(4, -1), values.reshape(4, -1))
++    count = torch.zeros(n_logical, device=pos.device)
++    count.scatter_add_(0, pos.reshape(-1), torch.ones(pos.numel(), device=pos.device))
++    present = count > 0
++    mean = torch.where(present, total / count.clamp(min=1.0), torch.full_like(total, LOG_EPS))
++    return mean, present
++
++
++def global_consensus(layer_values, layer_present):
++    """Mean over layers of the layer consensus, where present."""
++    values = torch.stack(layer_values)                                      # [L, 4, N]
++    present = torch.stack(layer_present).float()                            # [L, N]
++    count = present.sum(0)
++    mean = (values * present[:, None, :]).sum(0) / count.clamp(min=1.0)
++    return torch.where(count > 0, mean, torch.full_like(mean, LOG_EPS))
++
++
++def _pool(x, pos, n_logical, image_start, image_len, grid):
++    """Max of x over neighbours present in the same head: +-3 text tokens, 3x3 image."""
++    heads = x.shape[0]
++    buf = torch.full((heads, n_logical), LOG_EPS, device=x.device)
++    buf.scatter_(1, pos, x)
++    pooled = F.max_pool1d(buf.unsqueeze(1), kernel_size=7, stride=1, padding=3).squeeze(1)
++    if grid > 0 and image_start + image_len <= n_logical:
++        image = buf[:, image_start: image_start + image_len].reshape(heads, 1, grid, grid)
++        image = F.max_pool2d(image, kernel_size=3, stride=1, padding=1)
++        pooled[:, image_start: image_start + image_len] = image.reshape(heads, image_len)
++    return pooled.gather(1, pos)
++
++
++def _zscore(x):
++    return (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True) + 1e-6)
++
++
++def layer_features(snap, log_key_norm, log_value_norm, consensus, global_values, meta):
++    """[H, S, len(FEATURE_NAMES)] features of one layer.
++
++    snap: LayerStats.snapshot() (possibly restricted to some heads);
++    consensus: [4, N] from layer_consensus over ALL heads of the layer;
++    global_values: [4, N] from global_consensus; meta: see conversation_meta()."""
++    pos = snap["pos"]
++    n_logical = meta["n_logical"]
++    image_start, image_len, grid = meta["image_start"], meta["image_len"], meta["grid"]
++    own = torch.stack([snap["q"], snap["a"], snap["w"], snap["h"]], dim=-1)
++    flags = torch.stack([snap["q_has"], snap["a_has"], snap["h_has"]], dim=-1).float()
++    pooled = torch.stack(
++        [_pool(snap[name], pos, n_logical, image_start, image_len, grid) for name in ("q", "a", "w")],
++        dim=-1,
++    )
++    layer = consensus[:, pos].permute(1, 2, 0)
++    glob = global_values[:, pos].permute(1, 2, 0)
++    norms = torch.stack([_zscore(log_key_norm), _zscore(log_value_norm)], dim=-1)
++    seg = F.one_hot(meta["seg"][pos], len(SEGMENTS)).float()
++    turn = meta["turn"][pos]
++    age = (meta["turn_now"] - turn).clamp(min=0, max=4).float() / 4.0
++    current = (turn == meta["turn_now"]).float()
++    recency = torch.log1p((n_logical - 1 - pos).clamp(min=0).float()) / 8.0
++    offset = pos - image_start
++    in_image = (offset >= 0) & (offset < image_len)
++    if grid == 0:
++        in_image = torch.zeros_like(in_image)
++    half = max(1.0, (grid - 1) / 2.0)
++    row = torch.where(in_image, (offset // max(grid, 1)).float() / half - 1.0, torch.zeros_like(recency))
++    col = torch.where(in_image, (offset % max(grid, 1)).float() / half - 1.0, torch.zeros_like(recency))
++    radius = torch.sqrt(row * row + col * col) / math.sqrt(2.0)
++    structure = torch.stack([age, current, recency, row, col, radius], dim=-1)
++    return torch.cat([own, flags, pooled, layer, glob, norms, seg, structure], dim=-1)
++
++
++def conversation_meta(seg, turn, turn_now, image_start, image_len, device):
++    grid = int(round(math.sqrt(image_len))) if image_len else 0
++    if grid * grid != image_len:
++        grid = 0
++    return {
++        "seg": torch.as_tensor(seg, dtype=torch.long, device=device),
++        "turn": torch.as_tensor(turn, dtype=torch.long, device=device),
++        "turn_now": int(turn_now),
++        "n_logical": len(seg),
++        "image_start": int(image_start),
++        "image_len": int(image_len),
++        "grid": grid,
++    }
++
++
++def prompt_segments(prompt_len, image_start, image_len):
++    """Segment ids of the Turn-1 prompt "<system> USER: Q1\\n<image> ASSISTANT:"."""
++    seg = []
++    for p in range(prompt_len):
++        if p == 0:
++            seg.append(SEG_ID["sink"])
++        elif p < image_start:
++            seg.append(SEG_ID["prompt_text"])
++        elif p < image_start + image_len:
++            seg.append(SEG_ID["image"])
++        else:
++            seg.append(SEG_ID["user"])
++    return seg
++
++
++def window_scores(snaps):
++    """PyramidKV's rule from the same statistics: maxpool-7 of the last-8-row
++    attention, the newest WINDOW entries always kept."""
++    out = []
++    for snap in snaps:
++        w = snap["w"]
++        past = max(0, w.shape[1] - WINDOW)
++        pooled = torch.full_like(w, float("inf"))
++        if past:
++            pooled[:, :past] = F.max_pool1d(w[:, :past].unsqueeze(1), kernel_size=7, stride=1, padding=3).squeeze(1)
++        out.append(pooled)
++    return out
++
++
++def pyramid_budgets(n_layers, ratio, n_logical, lengths):
++    """Entries kept per layer: PyramidKV's linear pyramid, exact total L * C.
++
++    None when nothing needs to be evicted (logical length below the budget)."""
++    capacity = max(1, int(n_logical * (1.0 - ratio)))
++    window = max(1, min(WINDOW, capacity - 1)) if capacity > 1 else 1
++    schedule = PyramidKVCache(layer_num=n_layers, ratio=ratio, window_size=WINDOW, exact_budget=True)
++    caps = schedule.pyramid_capacities(capacity, window, max(lengths))
++    if caps is None:
++        return None
++    return [min(cap + window, length) for cap, length in zip(caps, lengths)]
++
++
++# ----------------------------------------------------------------------
++# The forecaster
++# ----------------------------------------------------------------------
++class TurnCastScorer(nn.Module):
++    """Tiny MLP: features of one cached entry -> logit of its future attention share."""
++
++    def __init__(self, n_layers, n_heads, n_features=len(FEATURE_NAMES), embed_dim=8, hidden=64):
++        super().__init__()
++        self.config = {
++            "n_layers": int(n_layers), "n_heads": int(n_heads), "n_features": int(n_features),
++            "embed_dim": int(embed_dim), "hidden": int(hidden),
++            "feature_names": list(FEATURE_NAMES), "feature_version": FEATURE_VERSION,
++        }
++        self.embed = nn.Embedding(n_layers * n_heads, embed_dim)
++        nn.init.normal_(self.embed.weight, std=0.1)
++        self.mlp = nn.Sequential(
++            nn.Linear(n_features + embed_dim, hidden), nn.GELU(),
++            nn.Linear(hidden, hidden), nn.GELU(),
++            nn.Linear(hidden, 1),
++        )
++        self.register_buffer("feat_mean", torch.zeros(n_features))
++        self.register_buffer("feat_std", torch.ones(n_features))
++
++    def forward(self, features, ids):
++        x = (features - self.feat_mean) / self.feat_std
++        return self.mlp(torch.cat([x, self.embed(ids)], dim=-1)).squeeze(-1)
++
++
++def save_scorer(scorer, path, extra=None):
++    torch.save({"config": scorer.config, "state_dict": scorer.state_dict(), "extra": extra or {}}, path)
++
++
++def load_scorer(path, device="cpu"):
++    blob = torch.load(path, map_location="cpu")
++    config = blob["config"]
++    if list(config["feature_names"]) != list(FEATURE_NAMES):
++        raise ValueError(f"{path} was trained with different features: {config['feature_names']}")
++    scorer = TurnCastScorer(config["n_layers"], config["n_heads"], config["n_features"],
++                            config["embed_dim"], config["hidden"])
++    scorer.load_state_dict(blob["state_dict"])
++    return scorer.to(device).eval()
++
++
++# ----------------------------------------------------------------------
++# The cache
++# ----------------------------------------------------------------------
++class TurnCastKVCache:
++    """Multi-turn KV eviction with a learned forecast of what later turns will read."""
++
++    def __init__(
++        self,
++        layer_num,
++        ratio=0.0,
++        scorer_path=None,
++        boundary="window",
++        image_start=None,
++        image_token_len=576,
++        k_seq_dim=2,
++        v_seq_dim=2,
++        scorer=None,
++        record=False,
++    ):
++        if k_seq_dim != 2 or v_seq_dim != 2:
++            raise ValueError("TurnCastKVCache expects KV layout [batch, heads, seq, dim]")
++        if not 0.0 <= float(ratio) < 1.0:
++            raise ValueError("ratio must satisfy 0 <= ratio < 1")
++        if boundary not in {"window", "forecast"}:
++            raise ValueError("boundary must be 'window' or 'forecast'")
++        if image_start is None:
++            raise ValueError("TurnCastKVCache needs image_start (passed by build_cache)")
++        self.layer_num = int(layer_num)
++        self.ratio = float(ratio)
++        self.boundary = boundary
++        self.image_start = int(image_start)
++        self.image_len = int(image_token_len)
++        self.record = bool(record)
++        self.score_override = None      # diagnostics: fn(cache, stage, feats, snaps) -> scores
++        self.scorer = scorer if scorer is not None else (load_scorer(scorer_path) if scorer_path else None)
++        if self.scorer is None and self.ratio > 0:
++            raise ValueError("TurnCastKVCache needs a trained scorer (--turncast-scorer)")
++        if self.scorer is not None and self.scorer.config["n_layers"] != self.layer_num:
++            raise ValueError(
++                f"scorer was trained for {self.scorer.config['n_layers']} layers, model has {self.layer_num}")
++        self.reset()
++
++    def reset(self):
++        self.stats = None
++        self.turn_now = -1
++        self.phase = "q"
++        self.seg, self.turn = [], []
++        self.n_logical = 0
++        self._pending_prefill = False
++        self.records = []
++        self.last_layer_budgets = None
++        self.last_finalize_stats = None
++        self.scored_entries = 0
++
++    def attach_model(self, model):
++        device = next(model.parameters()).device
++        if self.scorer is not None:
++            self.scorer = self.scorer.to(device)
++
++    # -- conversation structure ------------------------------------------
++    def register_question(self, question=None):
++        self.turn_now += 1
++        self._set_phase("q")
++
++    def begin_answer(self):
++        self._set_phase("a")
++
++    def _set_phase(self, phase):
++        self.phase = phase
++        if self.stats is not None:
++            for stats in self.stats:
++                stats.set_phase(phase)
++
++    # -- attention intake --------------------------------------------------
++    def observe_layer(self, layer_idx, attention):
++        """Prefill attention [1, H, N, N], delivered layer by layer by the hook."""
++        if attention.dim() != 4 or attention.shape[0] != 1:
++            raise RuntimeError(f"Expected [1, heads, queries, keys], got {tuple(attention.shape)}")
++        if attention.shape[2] == 1:
++            raise RuntimeError("TurnCastKVCache receives decoding attention through __call__")
++        if self.stats is None:
++            heads, device = attention.shape[1], attention.device
++            self.stats = [LayerStats(heads, device, attention.shape[-1] + 512) for _ in range(self.layer_num)]
++            self._set_phase(self.phase)
++        keys = attention.shape[-1]
++        self.stats[layer_idx].add_block(attention[0], torch.arange(keys))
++        self._pending_prefill = True
++
++    def __call__(self, past_key_values, num_of_token=None, attentions=None):
++        if past_key_values is None:
++            return None
++        if num_of_token is None:
++            raise ValueError("TurnCastKVCache requires num_of_token")
++        if self.turn_now < 0:
++            self.turn_now = 0          # caller did not register the first question
++        if self._pending_prefill:
++            self.seg = prompt_segments(num_of_token, self.image_start, self.image_len)
++            self.turn = [0] * num_of_token
++            self.n_logical = int(num_of_token)
++            self._pending_prefill = False
++            return self._compress(past_key_values, stage="prefill")
++
++        if attentions is None or attentions[0] is None:
++            raise ValueError("TurnCastKVCache requires decoding attention (output_attentions=True)")
++        if len(attentions) != self.layer_num or self.stats is None:
++            raise ValueError("TurnCastKVCache must observe the prefill first, one attention per layer")
++        if int(num_of_token) - self.n_logical != 1 or attentions[0].shape[2] != 1:
++            raise RuntimeError("TurnCastKVCache expects one new token per decoding call")
++        position = int(num_of_token) - 1
++        for layer_idx, attention in enumerate(attentions):
++            self.stats[layer_idx].add_row(attention[0, :, -1, :], position)
++        self.seg.append(SEG_ID["user"] if self.phase == "q" else SEG_ID["assistant"])
++        self.turn.append(self.turn_now)
++        self.n_logical = int(num_of_token)
++        return past_key_values
++
++    def finalize_turn(self, past_key_values):
++        if past_key_values is None or self.stats is None:
++            return past_key_values
++        return self._compress(past_key_values, stage="turn")
++
++    # -- scoring -------------------------------------------------------------
++    def snapshots(self, past_key_values):
++        snaps = []
++        for layer_idx, (key, _) in enumerate(past_key_values):
++            snap = self.stats[layer_idx].snapshot(key.shape[2])
++            if snap["pos"].shape[1] != key.shape[2]:
++                raise RuntimeError(
++                    f"TurnCast layer {layer_idx}: statistics cover {snap['pos'].shape[1]} entries, "
++                    f"KV has {key.shape[2]}")
++            snaps.append(snap)
++        return snaps
++
++    def features(self, past_key_values, snaps):
++        """Features of every cached entry: list over layers of [H, S_l, F]."""
++        device = past_key_values[0][0].device
++        meta = conversation_meta(self.seg, self.turn, self.turn_now, self.image_start, self.image_len, device)
++        layer_vals, layer_present = [], []
++        for snap in snaps:
++            values, present = layer_consensus(snap, meta["n_logical"])
++            layer_vals.append(values)
++            layer_present.append(present)
++        glob = global_consensus(layer_vals, layer_present)
++        feats = []
++        for layer_idx, (key, value) in enumerate(past_key_values):
++            log_k = key[0].float().norm(dim=-1).clamp(min=1e-6).log()
++            log_v = value[0].float().norm(dim=-1).clamp(min=1e-6).log()
++            feats.append(layer_features(snaps[layer_idx], log_k, log_v, layer_vals[layer_idx], glob, meta))
++        return feats
++
++    @torch.no_grad()
++    def score(self, feats):
++        heads = feats[0].shape[0]
++        flat = torch.cat([f.reshape(-1, f.shape[-1]) for f in feats])
++        ids = torch.cat([
++            (layer_idx * heads + torch.arange(heads, device=f.device)).view(-1, 1).expand(heads, f.shape[1]).reshape(-1)
++            for layer_idx, f in enumerate(feats)
++        ])
++        device = self.scorer.feat_mean.device
++        logits = self.scorer(flat.to(device), ids.to(device))
++        out, start = [], 0
++        for f in feats:
++            size = f.shape[0] * f.shape[1]
++            out.append(logits[start: start + size].view(f.shape[0], f.shape[1]).to(f.device))
++            start += size
++        self.scored_entries += start
++        return out
++
++    def _compress(self, past_key_values, stage):
++        lengths = [k.shape[2] for k, _ in past_key_values]
++        capacity = max(1, int(self.n_logical * (1.0 - self.ratio)))
++        budgets = pyramid_budgets(self.layer_num, self.ratio, self.n_logical, lengths)
++        compress = self.ratio > 0 and budgets is not None and any(b < l for b, l in zip(budgets, lengths))
++        use_forecast = stage == "prefill" or self.boundary == "forecast"
++        scores = None
++        if compress or self.record:
++            snaps = self.snapshots(past_key_values)
++            feats = None
++            if self.record or (compress and use_forecast and self.score_override is None):
++                feats = self.features(past_key_values, snaps)
++            if self.score_override is not None:
++                scores = self.score_override(self, stage, feats, snaps)
++            elif compress:
++                scores = self.score(feats) if use_forecast else window_scores(snaps)
++            if self.record:
++                self.records.append({
++                    "stage": stage, "turn": self.turn_now, "n_logical": self.n_logical,
++                    "features": [f.cpu() for f in feats], "pos": [s["pos"].cpu() for s in snaps],
++                })
++
++        if stage == "prefill" and self.boundary == "window" and not self.record:
++            # Turn boundaries use only the last-8-row window: stop accumulating turn statistics.
++            for stats in self.stats:
++                stats.fold()
++                stats.track_turns = False
++        new_past, kept = [], []
++        for layer_idx, (key, value) in enumerate(past_key_values):
++            stats = self.stats[layer_idx]
++            if stage == "turn":
++                stats.end_turn(lengths[layer_idx])
++            if not compress or budgets[layer_idx] >= lengths[layer_idx]:
++                stats.reset_window()
++                new_past.append([key, value])
++                kept.append(lengths[layer_idx])
++                continue
++            layer_scores = scores[layer_idx].clone()
++            layer_scores[stats.pos[:, : stats.n] == 0] = float("inf")     # attention sink
++            index = layer_scores.topk(budgets[layer_idx], dim=-1).indices.sort(dim=-1).values
++            stats.gather(index)
++            if self.record:
++                self.records[-1].setdefault("kept", {})[layer_idx] = stats.pos[:, : stats.n].cpu()
++            gather = index.to(key.device)[None, :, :, None]
++            new_past.append([
++                key.gather(2, gather.expand(key.shape[0], -1, -1, key.shape[-1])),
++                value.gather(2, gather.expand(value.shape[0], -1, -1, value.shape[-1])),
++            ])
++            kept.append(budgets[layer_idx])
++
++        self.last_layer_budgets = kept
++        self.last_finalize_stats = {
++            "stage": stage, "turn": self.turn_now + 1, "logical_len": int(self.n_logical),
++            "target_per_layer": int(capacity),
++            "rule": "forecast" if use_forecast else "pyramidkv_window",
++            "kv_before_mean": float(sum(lengths) / len(lengths)),
++            "kv_after_mean": float(sum(kept) / len(kept)), "layer_budgets": kept,
++        }
++        return new_past
+diff --git a/rehearsal_toy/README.md b/rehearsal_toy/README.md
+new file mode 100644
+index 0000000..93645fa
+--- /dev/null
++++ b/rehearsal_toy/README.md
+@@ -0,0 +1,53 @@
++# Controlled multi-turn eviction test (synthetic, optional)
++
++A synthetic multi-turn visual QA task that isolates the problem RehearsalKV
++targets: later questions ask about image regions that Turn 1 never looked at.
++It is a mechanism test, not a substitute for ConvBench / MultiVerse on
++LLaVA-1.5-7B.
++
++**Status.** In the CPU sandbox where RehearsalKV was written, the small model
++learned the answer format but never reached visual retrieval (full-cache
++accuracy stayed at chance after 2,000-3,000 steps), so this test did not
++separate the methods there. On a GPU, train for much longer and only compare
++eviction methods once the full-cache model answers > 90% of questions.
++
++## Tasks
++
++* `make_needles.py` (recommended): six objects on a 12x12 grid (144 visual
++  tokens). Each object is ONE patch: a top-half key colour plus a left and a
++  right stripe, so every answer needs exactly one visual token.
++  "What color is the left stripe of the red block?"
++* `make_mtblocks.py`: four 3-patch objects (key patch, right neighbour, patch
++  below); harder, because answers need neighbouring tokens.
++
++Test conversations have 3 turns: T1 asks about object k1; T2 is a follow-up on
++k1 (50%) or a new object (50%); T3 is a new object (50%) or a revisit.
++Training conversations add a "Describe the image in detail." turn 15% of the
++time (the analogue of LLaVA's detail data); test conversations never do.
++
++## Model
++
++The repo's own `LlavaLlamaForCausalLM` (8 layers, d=128) in the evaluator's
++prompt format (`Q1\n<image>`, LLaVA v1 template, slow LLaMA tokenizer loaded
++exactly as the evaluator loads it). `VISION=analytic` (default for needles)
++uses a frozen vision tower whose patch features are the mean colours of the
++patch's regions, as LLaVA keeps CLIP frozen; `VISION=learned` trains it.
++
++## Run
++
++```bash
++# the repo's environment (transformers 4.31, torch 2.1)
++python rehearsal_toy/make_needles.py                       # -> rehearsal_toy/work/needles
++TOY_TASK=needles STEPS=20000 BATCH=32 python rehearsal_toy/train_toy.py
++#   resume: RESUME=<llm dir copy> RESUME_CLIP=<clip dir copy> SEED=8 CONST_LR=5e-4 ...
++bash rehearsal_toy/run_all.sh rehearsal_toy/work/runs 300 "0.0" "local_cache"   # full-cache ceiling
++bash rehearsal_toy/run_all.sh rehearsal_toy/work/runs 300 "0.9 0.8" \
++    "pyramidkv pyramidkv:--pyramid-exact-budget rehearsal_kv rehearsal_kv:--rehearsal-aggregation+max tgv_kv meda h2o local_cache"
++python rehearsal_toy/score_toy.py rehearsal_toy/work/needles/test.json rehearsal_toy/work/runs/*_predictions.json
++python rehearsal_toy/test_rehearsal.py                     # RehearsalKV correctness checks
++```
++
++`run_eval.py` runs the unchanged `eval_rouge_final2.py` with two test-only
++shims: fp32 on CPU, and the layer count read from the model config.
++`score_toy.py` reports exact answer accuracy by turn and by question type
++(t1, follow-up, new object, revisit).
+diff --git a/rehearsal_toy/make_mtblocks.py b/rehearsal_toy/make_mtblocks.py
+new file mode 100644
+index 0000000..2987d6c
+--- /dev/null
++++ b/rehearsal_toy/make_mtblocks.py
+@@ -0,0 +1,136 @@
++"""MT-Blocks: a synthetic multi-turn visual QA set for KV-eviction mechanism tests.
++
++Each image is a 12x12 grid of 14-px patches (168x168 px -> 144 visual tokens).
++Four "objects" are placed on a noisy gray background.  An object is three
++patches:  a KEY patch, a patch to its RIGHT, and a patch BELOW it.  Key colors
++are unique per image and disjoint from attribute colors, so "the red block"
++names exactly one key patch.
++
++Questions are about one object at a time:
++    RIGHT(k): "What color is to the right of the red block?"
++    BELOW(k): "What color is below the red block?"
++and, in training only, DESCRIBE: "Describe the image in detail." (lists all
++objects) - the analogue of LLaVA's detailed-description instruction data.
++
++A test conversation has three turns:
++    T1  one relation of object k1
++    T2  50% follow-up on k1 (other relation), 50% a NEW object k2
++    T3  50% a NEW object, 50% revisit an object already asked about
++
++So half of the later questions need image regions that Turn 1 never looked
++at - the situation a multi-turn KV cache must anticipate.
++"""
++import json
++import os
++import random
++import sys
++
++import numpy as np
++from PIL import Image
++
++PALETTE = {
++    "red": (220, 30, 30), "green": (30, 180, 60), "blue": (40, 70, 230),
++    "yellow": (240, 220, 40), "purple": (150, 50, 190), "orange": (250, 140, 20),
++    "pink": (250, 120, 190), "cyan": (40, 220, 230), "white": (245, 245, 245),
++    "brown": (130, 80, 40),
++}
++GRID, PATCH, N_OBJ = 12, 14, 4
++
++
++def draw(objects, rng):
++    img = rng.normal(90, 10, size=(GRID * PATCH, GRID * PATCH, 3))
++    for obj in objects:
++        for (r, c), color in ((obj["pos"], obj["key"]),
++                              ((obj["pos"][0], obj["pos"][1] + 1), obj["right"]),
++                              ((obj["pos"][0] + 1, obj["pos"][1]), obj["below"])):
++            img[r * PATCH:(r + 1) * PATCH, c * PATCH:(c + 1) * PATCH] = PALETTE[color]
++    return Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
++
++
++def sample_scene(rng):
++    colors = list(PALETTE)
++    rng.shuffle(colors)
++    keys, attrs = colors[:N_OBJ], colors[N_OBJ:]
++    taken, objects = set(), []
++    for key in keys:
++        while True:
++            r, c = rng.randrange(GRID - 1), rng.randrange(GRID - 1)
++            cells = {(r, c), (r, c + 1), (r + 1, c)}
++            halo = {(a + dr, b + dc) for a, b in cells for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
++            if not halo & taken:
++                taken |= cells
++                break
++        objects.append({"key": key, "pos": (r, c),
++                        "right": rng.choice(attrs), "below": rng.choice(attrs)})
++    return objects
++
++
++def qa(obj, relation):
++    if relation == "right":
++        return (f"What color is to the right of the {obj['key']} block?",
++                f"The color to the right of the {obj['key']} block is {obj['right']}.",
++                obj["right"])
++    return (f"What color is below the {obj['key']} block?",
++            f"The color below the {obj['key']} block is {obj['below']}.",
++            obj["below"])
++
++
++def describe(objects):
++    ordered = sorted(objects, key=lambda o: o["pos"])
++    parts = [f"the {o['key']} block has {o['right']} to its right and {o['below']} below it"
++             for o in ordered]
++    return "Describe the image in detail.", "There are four blocks: " + "; ".join(parts) + ".", None
++
++
++def conversation(objects, rng, allow_describe):
++    other = {"right": "below", "below": "right"}
++    order = list(range(len(objects)))
++    rng.shuffle(order)
++    turns, asked = [], []
++    if allow_describe and rng.random() < 0.15:
++        turns.append(describe(objects))
++    k1, rel1 = order[0], rng.choice(["right", "below"])
++    turns.append(qa(objects[k1], rel1))
++    asked.append((k1, rel1))
++    if rng.random() < 0.5:                                  # T2 follow-up
++        turns.append(qa(objects[k1], other[rel1]))
++        asked.append((k1, other[rel1]))
++        nxt = 1
++    else:                                                   # T2 new object
++        rel = rng.choice(["right", "below"])
++        turns.append(qa(objects[order[1]], rel))
++        asked.append((order[1], rel))
++        nxt = 2
++    if rng.random() < 0.5:                                  # T3 new object
++        turns.append(qa(objects[order[nxt]], rng.choice(["right", "below"])))
++    else:                                                   # T3 revisit
++        k, _ = rng.choice(asked)
++        turns.append(qa(objects[k], rng.choice(["right", "below"])))
++    return turns
++
++
++def build(out_dir, n, seed, allow_describe):
++    rng = random.Random(seed)
++    nrng = np.random.default_rng(seed)
++    os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
++    items = []
++    for index in range(n):
++        objects = sample_scene(rng)
++        name = f"blk_{seed}_{index:06d}.png"
++        draw(objects, nrng).save(os.path.join(out_dir, "images", name))
++        turns = conversation(objects, rng, allow_describe)
++        items.append({
++            "image": name,
++            "turns": [{"question": q, "answer": a, "target": t} for q, a, t in turns],
++            "objects": objects,
++        })
++    return items
++
++
++if __name__ == "__main__":
++    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "work", "data")
++    # Training data is generated on the fly by train_toy.py; only the test
++    # set (fixed seed 2, no DESCRIBE turns) is written to disk.
++    test = build(out, int(sys.argv[2]) if len(sys.argv) > 2 else 300, 2, False)
++    json.dump(test, open(os.path.join(out, "test.json"), "w"))
++    print("test conversations:", len(test))
+diff --git a/rehearsal_toy/make_needles.py b/rehearsal_toy/make_needles.py
+new file mode 100644
+index 0000000..fc6d812
+--- /dev/null
++++ b/rehearsal_toy/make_needles.py
+@@ -0,0 +1,126 @@
++"""MT-Needles: MT-Blocks variant where every object is ONE visual token.
++
++Each object is a single 14-px patch: the top half is its KEY colour, the
++bottom-left quarter its LEFT stripe, the bottom-right quarter its RIGHT
++stripe.  Six objects sit on a noisy gray 12x12 grid (144 visual tokens), so
++every question needs exactly one visual token: evict it and the answer is lost.
++
++Questions:  "What color is the left stripe of the red block?"
++            "What color is the right stripe of the red block?"
++Training only: "Describe the image in detail." (lists every block).
++Test conversations (3 turns): T1 = one stripe of k1; T2 = the other stripe of
++k1 (follow-up, 50%) or a new block (50%); T3 = a new block (50%) or a revisit.
++Same API as make_mtblocks.py (sample_scene, draw, conversation, build).
++"""
++import json
++import os
++import random
++import sys
++
++import numpy as np
++from PIL import Image
++
++PALETTE = {
++    "red": (220, 30, 30), "green": (30, 180, 60), "blue": (40, 70, 230),
++    "yellow": (240, 220, 40), "purple": (150, 50, 190), "orange": (250, 140, 20),
++    "pink": (250, 120, 190), "cyan": (40, 220, 230), "white": (245, 245, 245),
++    "brown": (130, 80, 40),
++}
++GRID, PATCH, N_OBJ = 12, 14, 6
++
++
++def draw(objects, rng):
++    img = rng.normal(90, 10, size=(GRID * PATCH, GRID * PATCH, 3))
++    half = PATCH // 2
++    for obj in objects:
++        r, c = obj["pos"]
++        y, x = r * PATCH, c * PATCH
++        img[y:y + half, x:x + PATCH] = PALETTE[obj["key"]]
++        img[y + half:y + PATCH, x:x + half] = PALETTE[obj["left"]]
++        img[y + half:y + PATCH, x + half:x + PATCH] = PALETTE[obj["right"]]
++    return Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
++
++
++def sample_scene(rng):
++    colors = list(PALETTE)
++    rng.shuffle(colors)
++    keys, attrs = colors[:N_OBJ], colors[N_OBJ:]
++    cells = rng.sample([(r, c) for r in range(GRID) for c in range(GRID)], N_OBJ)
++    return [{"key": k, "pos": cell, "left": rng.choice(attrs), "right": rng.choice(attrs)}
++            for k, cell in zip(keys, cells)]
++
++
++def qa(obj, side):
++    return (f"What color is the {side} stripe of the {obj['key']} block?",
++            f"The {side} stripe of the {obj['key']} block is {obj[side]}.",
++            obj[side])
++
++
++def describe(objects):
++    ordered = sorted(objects, key=lambda o: o["pos"])
++    parts = [f"the {o['key']} block has a {o['left']} left stripe and a {o['right']} right stripe"
++             for o in ordered]
++    return "Describe the image in detail.", "There are six blocks: " + "; ".join(parts) + ".", None
++
++
++def conversation(objects, rng, allow_describe):
++    other = {"left": "right", "right": "left"}
++    order = list(range(len(objects)))
++    rng.shuffle(order)
++    turns, asked = [], []
++    if allow_describe and rng.random() < 0.15:
++        turns.append(describe(objects))
++    side1 = rng.choice(["left", "right"])
++    turns.append(qa(objects[order[0]], side1))
++    asked.append(order[0])
++    if rng.random() < 0.5:
++        turns.append(qa(objects[order[0]], other[side1]))
++        nxt = 1
++    else:
++        turns.append(qa(objects[order[1]], rng.choice(["left", "right"])))
++        asked.append(order[1])
++        nxt = 2
++    if rng.random() < 0.5:
++        turns.append(qa(objects[order[nxt]], rng.choice(["left", "right"])))
++    else:
++        turns.append(qa(objects[rng.choice(asked)], rng.choice(["left", "right"])))
++    return turns
++
++
++def train_conversation(objects, rng, n_questions=4):
++    """Training only: optional DESCRIBE, then n questions mixing follow-ups,
++    revisits and new blocks (more supervision per image than a test turn)."""
++    turns = [describe(objects)] if rng.random() < 0.15 else []
++    asked = []
++    for _ in range(n_questions):
++        if asked and rng.random() < 0.5:
++            obj = rng.choice(asked)
++        else:
++            obj = rng.choice(objects)
++            asked.append(obj)
++        turns.append(qa(obj, rng.choice(["left", "right"])))
++    return turns
++
++
++def build(out_dir, n, seed, allow_describe):
++    rng = random.Random(seed)
++    nrng = np.random.default_rng(seed)
++    os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
++    items = []
++    for index in range(n):
++        objects = sample_scene(rng)
++        name = f"ndl_{seed}_{index:06d}.png"
++        draw(objects, nrng).save(os.path.join(out_dir, "images", name))
++        items.append({"image": name,
++                      "turns": [{"question": q, "answer": a, "target": t}
++                                for q, a, t in conversation(objects, rng, allow_describe)],
++                      "objects": objects})
++    return items
++
++
++if __name__ == "__main__":
++    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
++        os.path.dirname(os.path.abspath(__file__)), "work", "needles")
++    test = build(out, int(sys.argv[2]) if len(sys.argv) > 2 else 300, 2, False)
++    json.dump(test, open(os.path.join(out, "test.json"), "w"))
++    print("test conversations:", len(test))
+diff --git a/rehearsal_toy/run_all.sh b/rehearsal_toy/run_all.sh
+new file mode 100644
+index 0000000..f1f227e
+--- /dev/null
++++ b/rehearsal_toy/run_all.sh
+@@ -0,0 +1,29 @@
++#!/bin/bash
++# Evaluate every method on MT-Blocks through eval_rouge_final2.py (via run_eval.py).
++# Usage: bash run_all.sh <out_dir> <n_samples> "<ratios>" "<method specs>"
++# A method spec is  name[:extra args, '+' for spaces], e.g.
++#   pyramidkv  pyramidkv:--pyramid-exact-budget  rehearsal_kv:--rehearsal-acts+revisit,explore,respond
++# Activate the environment that runs the repo (transformers 4.31) before calling this.
++HERE=$(cd "$(dirname "$0")" && pwd)
++OUT=$1; N=$2; RATIOS=$3; SPECS=$4
++MODEL=${TOY_MODEL:-$HERE/work/models_needles/llava-v1.5-7b-needles}
++DATA=${TOY_DATA:-$HERE/work/needles}
++mkdir -p $OUT
++jobs_list=()
++for RATIO in $RATIOS; do
++  for SPEC in $SPECS; do
++    METHOD=${SPEC%%:*}; EXTRA=""
++    [[ "$SPEC" == *:* ]] && EXTRA=$(echo "${SPEC#*:}" | tr '+' ' ')
++    jobs_list+=("$METHOD|$RATIO|$EXTRA")
++  done
++done
++run_one () {
++  IFS='|' read -r METHOD RATIO EXTRA <<< "$1"
++  TAG=$(echo "$METHOD $EXTRA" | tr ' ' '_' | tr -d '-')
++  THREADS=1 python $HERE/run_eval.py --model-path $MODEL --data-path $DATA/test.json \
++      --image-path $DATA/images --device cpu --method $METHOD --ratio $RATIO \
++      --eval-samples $N --max-token-generated 20 --output-dir $OUT $EXTRA \
++      > $OUT/log_${TAG}_${RATIO}.txt 2>&1 && echo "done $METHOD $EXTRA $RATIO" || echo "FAILED $METHOD $EXTRA $RATIO"
++}
++export -f run_one; export OUT N MODEL DATA HERE
++printf '%s\n' "${jobs_list[@]}" | xargs -P 2 -I{} bash -c 'run_one "$@"' _ {}
+diff --git a/rehearsal_toy/run_eval.py b/rehearsal_toy/run_eval.py
+new file mode 100644
+index 0000000..a6d6584
+--- /dev/null
++++ b/rehearsal_toy/run_eval.py
+@@ -0,0 +1,48 @@
++"""Run the repo's eval_rouge_final2.py on CPU for pipeline / toy tests.
++
++Test-only shims (the evaluator logic itself is unchanged):
++  1. Cast the loaded model to float32 (CPU has no fast bf16/fp16 kernels).
++  2. Read the layer count from the model config instead of the "7b" -> 32 rule,
++     so small test models with fewer layers build correctly sized caches.
++Usage: python run_eval.py <normal eval_rouge_final2.py arguments>
++"""
++import os
++import sys
++import types
++
++import torch
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++os.chdir(REPO)
++torch.set_num_threads(int(os.environ.get("THREADS", 2)))
++
++source = open(os.path.join(REPO, "eval_rouge_final2.py")).read()
++old = 'layer_num = 32 if "7b" in model_name.lower() else 40'
++assert source.count(old) == 1
++source = source.replace(old, "layer_num = _TEST_LAYER_NUM")
++source = source.replace(
++    "    tokenizer, model, image_processor, loader_context_length = load_pretrained_model(",
++    "    tokenizer, model, image_processor, loader_context_length = _test_load(",
++)
++module = types.ModuleType("eval_rouge_final2_test")
++module.__file__ = os.path.join(REPO, "eval_rouge_final2.py")
++sys.modules["eval_rouge_final2_test"] = module
++
++
++def _test_load(*args, **kwargs):
++    from llava.model.builder import load_pretrained_model
++
++    tokenizer, model, processor, ctx = load_pretrained_model(*args, **kwargs)
++    model = model.float()
++    model.get_vision_tower().to(dtype=torch.float32)
++    model.eval()
++    module._TEST_LAYER_NUM = int(model.config.num_hidden_layers)
++    return tokenizer, model, processor, ctx
++
++
++module._test_load = _test_load
++module._TEST_LAYER_NUM = None
++sys.argv = ["eval_rouge_final2.py"] + sys.argv[1:]
++code = compile(source.replace('if __name__ == "__main__":', "if True:"), module.__file__, "exec")
++exec(code, module.__dict__)
+diff --git a/rehearsal_toy/score_toy.py b/rehearsal_toy/score_toy.py
+new file mode 100644
+index 0000000..28b8247
+--- /dev/null
++++ b/rehearsal_toy/score_toy.py
+@@ -0,0 +1,54 @@
++"""Score MT-Blocks runs: exact answer accuracy per turn and per question type.
++
++A turn is correct when the LAST color word in the prediction is the target
++color (answers have the form "The color ... is <color>.").
++Usage: python score_toy.py test.json run1_predictions.json [run2 ...]
++"""
++import json
++import re
++import sys
++
++COLORS = ["red", "green", "blue", "yellow", "purple", "orange", "pink", "cyan", "white", "brown"]
++PATTERN = re.compile(r"\b(" + "|".join(COLORS) + r")\b")
++
++
++def turn_kinds(item):
++    """Label turns: t1, follow (same object as T1), new (unseen object), revisit."""
++    seen, kinds = [], []
++    for index, turn in enumerate(item["turns"]):
++        key = re.search(r"the (\w+) block", turn["question"]).group(1)
++        if index == 0:
++            kinds.append("t1")
++        elif key in seen:
++            kinds.append("follow" if index == 1 else "revisit")
++        else:
++            kinds.append("new")
++        seen.append(key)
++    return kinds
++
++
++def score(test, run):
++    stats = {}
++    for item, result in zip(test, run["results"]):
++        assert item["image"] == result["image"]
++        for kind, turn, pred in zip(turn_kinds(item), item["turns"], result["turns"]):
++            colors = PATTERN.findall(pred["prediction"].lower())
++            ok = bool(colors) and colors[-1] == turn["target"]
++            for key in (f"turn{pred['turn']}", kind, "all"):
++                hit, total = stats.get(key, (0, 0))
++                stats[key] = (hit + ok, total + 1)
++    return stats
++
++
++if __name__ == "__main__":
++    test = json.load(open(sys.argv[1]))
++    keys = ["all", "turn1", "turn2", "turn3", "follow", "new", "revisit"]
++    print(f"{'run':<44}" + "".join(f"{k:>9}" for k in keys))
++    for path in sys.argv[2:]:
++        run = json.load(open(path))
++        stats = score(test, run)
++        cells = []
++        for key in keys:
++            hit, total = stats.get(key, (0, 0))
++            cells.append(f"{100.0 * hit / total:8.1f}%" if total else "      n/a")
++        print(f"{run['experiment'][:43]:<44}" + "".join(cells))
+diff --git a/rehearsal_toy/test_rehearsal.py b/rehearsal_toy/test_rehearsal.py
+new file mode 100644
+index 0000000..2c3631a
+--- /dev/null
++++ b/rehearsal_toy/test_rehearsal.py
+@@ -0,0 +1,95 @@
++"""Correctness tests for RehearsalKVCache on any LLaVA checkpoint (TOY_MODEL=<path>, TEST_DEVICE=cuda|cpu)."""
++import os
++import sys
++
++import torch
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++os.chdir(REPO)
++torch.manual_seed(0)
++torch.set_num_threads(1)
++
++from kv_cache_rehearsal import RehearsalKVCache  # noqa: E402
++from llava.model.builder import load_pretrained_model  # noqa: E402
++from tgv_kv_legacy_nova import enable_legacy_tgv_attention, enable_online_attention  # noqa: E402
++
++enable_legacy_tgv_attention()
++path = os.environ.get("TOY_MODEL", os.path.join(REPO, "rehearsal_toy", "work", "models_needles", "llava-v1.5-7b-needles"))
++DEVICE = os.environ.get("TEST_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
++tok, model, _, _ = load_pretrained_model(path, None, os.path.basename(path.rstrip("/")) or "llava", device=DEVICE)
++model = (model.float() if DEVICE == "cpu" else model).eval()   # CPU has no fp16/bf16 GEMM in torch 2.1
++enable_online_attention(model)
++L = model.config.num_hidden_layers
++
++# A fake "conversation" cache: prefill 120 text tokens.
++ids = torch.randint(5, len(tok) - 1, (1, 120), device=DEVICE)
++with torch.no_grad():
++    out = model(input_ids=ids, use_cache=True)
++past = [[k, v] for k, v in out.past_key_values]
++
++cache = RehearsalKVCache(layer_num=L, ratio=0.8, tokenizer=tok)
++cache.attach_model(model)
++cache.register_question("What color is the car?")
++
++# 1) The rehearsal leaves the cache and the next-token prediction untouched.
++before = [(k.clone(), v.clone()) for k, v in past]
++nxt = torch.tensor([[7]], device=DEVICE)
++with torch.no_grad():
++    ref = model(input_ids=nxt, position_ids=torch.tensor([[120]], device=DEVICE),
++                past_key_values=past, use_cache=True).logits
++cache.latest_logical_len = 120
++cache._rehearse(past, "prefill")
++same = all(torch.equal(k, a) and torch.equal(v, b) for (k, v), (a, b) in zip(past, before))
++with torch.no_grad():
++    after = model(input_ids=nxt, position_ids=torch.tensor([[120]], device=DEVICE),
++                  past_key_values=past, use_cache=True).logits
++print("1) cache unchanged by rehearsal:", same, "| next-token logits identical:",
++      torch.equal(ref, after))
++assert same and torch.equal(ref, after)
++
++# 2) Exact budget, also when layers have uneven lengths (as after a prior compression).
++cache = RehearsalKVCache(layer_num=L, ratio=0.8, tokenizer=tok)
++cache.attach_model(model)
++cache.register_question("What color is the car?")
++new = cache(past, num_of_token=120)                       # prefill compression
++target = int(120 * (1.0 - 0.8))
++lengths = [k.shape[2] for k, _ in new]
++print("2a) prefill: target/layer", target, "mean kept", sum(lengths) / L, "min/max", min(lengths), max(lengths))
++assert sum(lengths) == target * L
++# Grow every layer by 30 "answer" tokens, then compress at a turn boundary.
++grown = []
++from tgv_kv_legacy_nova import set_legacy_logical_position_limit  # noqa: E402
++set_legacy_logical_position_limit(model, 150)   # the evaluator does this before every forward
++with torch.no_grad():
++    o = model(input_ids=torch.randint(5, len(tok) - 1, (1, 30), device=DEVICE),
++              position_ids=torch.arange(120, 150, device=DEVICE).unsqueeze(0),
++              past_key_values=new, use_cache=True)
++grown = [[k, v] for k, v in o.past_key_values]
++cache.latest_logical_len = 150
++final = cache.finalize_turn(grown)
++lengths = [k.shape[2] for k, _ in final]
++print("2b) boundary: target/layer", int(150 * (1.0 - 0.8)), "mean kept", sum(lengths) / L,
++      "stats acts", cache.last_finalize_stats["rehearsal_acts"])
++assert sum(lengths) == int(150 * (1.0 - 0.8)) * L
++
++# 3) Sink and the 8 most recent entries are always kept (check via key identity, head 0).
++k_before = grown[5][0][0, 0]          # [S, D] layer 5 head 0 before compression
++k_after = final[5][0][0, 0]
++def contains(row):
++    return bool(((k_after - row).abs().sum(-1) == 0).any())
++ok_sink = contains(k_before[0])
++ok_recent = all(contains(k_before[-i]) for i in range(1, 9))
++print("3) sink kept:", ok_sink, "| 8 recent kept:", ok_recent)
++assert ok_sink and ok_recent
++
++# 4) GQA path: 8 query heads sharing 2 KV heads.
++gqa = RehearsalKVCache(layer_num=1, ratio=0.5, tokenizer=tok)
++gqa._kv_lengths, gqa._kv_heads = [20], [2]
++gqa._scores, gqa._demand = [None], [None]
++gqa._weights = torch.full((4,), 0.25)
++att = torch.softmax(torch.randn(1, 8, 4, 24), dim=-1)
++gqa._rehearsal_sink(0, att)
++print("4) GQA scores shape:", tuple(gqa._scores[0].shape), "demand:", round(float(gqa._demand[0]), 4))
++assert gqa._scores[0].shape == (2, 20)
++print("ALL TESTS PASSED")
+diff --git a/rehearsal_toy/train_toy.py b/rehearsal_toy/train_toy.py
+new file mode 100644
+index 0000000..880b71b
+--- /dev/null
++++ b/rehearsal_toy/train_toy.py
+@@ -0,0 +1,240 @@
++"""Train a tiny LLaVA-architecture model on MT-Blocks (CPU, from scratch).
++
++Uses the repo's own LlavaLlamaForCausalLM, the LLaVA v1 conversation template
++and the evaluator's prompt format ("Q1\\n<image>"), so the trained checkpoint
++loads with llava.model.builder.load_pretrained_model and runs unchanged
++through eval_rouge_final2.py.  Loss is on assistant answers only (LLaVA SFT).
++"""
++import json
++import math
++import os
++import random
++import sys
++import time
++
++import numpy as np
++import sentencepiece as spm
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++REPO = os.path.dirname(HERE)
++sys.path.insert(0, REPO)
++sys.path.insert(0, HERE)
++torch.set_num_threads(2)
++
++TASK = os.environ.get("TOY_TASK", "blocks")
++if TASK == "needles":
++    from make_needles import conversation, draw, sample_scene, train_conversation  # noqa: E402
++else:
++    from make_mtblocks import conversation, draw, sample_scene  # noqa: E402
++
++OUT = os.environ.get("TOY_MODELS", os.path.join(HERE, "work", "models_" + TASK))
++LLM_DIR = os.path.join(OUT, "llava-v1.5-7b-mtblocks" if TASK == "blocks" else "llava-v1.5-7b-needles")   # "llava", "v1", "7b" drive the evaluator
++CLIP_DIR = os.path.join(OUT, "clip-mtblocks-168")
++STEPS = int(os.environ.get("STEPS", 3000))
++BATCH = int(os.environ.get("BATCH", 8))
++LAYERS = int(os.environ.get("LAYERS", 8))
++os.makedirs(LLM_DIR, exist_ok=True)
++os.makedirs(CLIP_DIR, exist_ok=True)
++torch.manual_seed(0)
++random.seed(0)
++
++SYSTEM = ("A chat between a curious human and an artificial intelligence assistant. "
++          "The assistant gives helpful, detailed, and polite answers to the human's questions.")
++
++# ---------------------------------------------------------------- tokenizer
++RESUME = os.environ.get("RESUME")      # continue from a saved checkpoint dir
++if RESUME:
++    import shutil
++    for name in ("tokenizer.model", "tokenizer_config.json", "special_tokens_map.json"):
++        shutil.copy(os.path.join(RESUME, name), os.path.join(LLM_DIR, name))
++    from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel  # noqa: E402
++else:
++    corpus = os.path.join(OUT, "corpus.txt")
++    rng = random.Random(123)
++    with open(corpus, "w") as handle:
++        for _ in range(4000):
++            objs = sample_scene(rng)
++            for q, a, _ in conversation(objs, rng, True):
++                handle.write(q + "\n" + a + "\n")
++        # Tokenizer corpus only (no model training on these): frequent enough that
++        # template words become single pieces instead of byte fallbacks.
++        for _ in range(1500):
++            handle.write(SYSTEM + "\nUSER: ASSISTANT:\nSummarize our conversation so far.\n")
++    spm.SentencePieceTrainer.train(
++        input=corpus, model_prefix=os.path.join(OUT, "tok"), vocab_size=600, model_type="bpe",
++        byte_fallback=True, character_coverage=1.0, unk_id=0, bos_id=1, eos_id=2, pad_id=-1,
++        num_threads=2, minloglevel=2,
++    )
++    from transformers import (  # noqa: E402
++        CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel, LlamaForCausalLM, LlamaTokenizer,
++    )
++
++    LlamaTokenizer(vocab_file=os.path.join(OUT, "tok.model"), legacy=True).save_pretrained(LLM_DIR)
++# Reload exactly as the evaluator does (load_pretrained_model -> AutoTokenizer,
++# use_fast=False): only then is "</s>" an unsplittable EOS token.
++from transformers import AutoTokenizer  # noqa: E402
++
++tok = AutoTokenizer.from_pretrained(LLM_DIR, use_fast=False)
++assert tok("a</s>USER:", add_special_tokens=False).input_ids.count(tok.eos_token_id) == 1, \
++    "'</s>' must encode as the EOS id, as in the evaluator"
++
++from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX  # noqa: E402
++from llava.conversation import conv_templates  # noqa: E402
++from llava.mm_utils import tokenizer_image_token  # noqa: E402
++from llava.model.language_model.llava_llama import LlavaConfig, LlavaLlamaForCausalLM  # noqa: E402
++
++# ---------------------------------------------------------------- models
++clip_cfg = CLIPVisionConfig(hidden_size=64, intermediate_size=128, num_hidden_layers=2,
++                            num_attention_heads=4, image_size=168, patch_size=14, projection_dim=64)
++clip = (CLIPVisionModel.from_pretrained(os.environ["RESUME_CLIP"]) if RESUME
++        else CLIPVisionModel(clip_cfg))
++# VISION=analytic (default for the needles task): a FROZEN tower whose patch
++# features are the mean colours of the patch's top half and two bottom stripes
++# (identity encoder layers) - like LLaVA, which keeps CLIP frozen and trains
++# only the projector and the LLM.  VISION=learned trains the tower from pixels.
++VISION = os.environ.get("VISION", "analytic" if TASK == "needles" else "learned")
++if VISION == "analytic" and not RESUME:
++    vm = clip.vision_model
++    with torch.no_grad():
++        w = torch.zeros_like(vm.embeddings.patch_embedding.weight)    # [64, 3, 14, 14]
++        for c in range(3):
++            w[c, c, 0:7, :] = 1.0 / (7 * 14)        # top half: key colour
++            w[3 + c, c, 7:14, 0:7] = 1.0 / 49       # bottom-left stripe
++            w[6 + c, c, 7:14, 7:14] = 1.0 / 49      # bottom-right stripe
++        vm.embeddings.patch_embedding.weight.copy_(w)
++        vm.embeddings.position_embedding.weight.zero_()
++        vm.embeddings.class_embedding.zero_()
++        for layer in vm.encoder.layers:              # identity encoder layers
++            layer.self_attn.out_proj.weight.zero_()
++            layer.self_attn.out_proj.bias.zero_()
++            layer.mlp.fc2.weight.zero_()
++            layer.mlp.fc2.bias.zero_()
++if VISION == "analytic":
++    clip.requires_grad_(False)
++clip.save_pretrained(CLIP_DIR)   # LlavaMetaModel reads this config at construction
++processor = CLIPImageProcessor(size={"shortest_edge": 168}, crop_size={"height": 168, "width": 168},
++                               image_mean=[0.48145466, 0.4578275, 0.40821073],
++                               image_std=[0.26862954, 0.26130258, 0.27577711])
++processor.save_pretrained(CLIP_DIR)
++
++cfg = LlavaConfig(vocab_size=len(tok), hidden_size=128, intermediate_size=352,
++                  num_hidden_layers=LAYERS, num_attention_heads=4, num_key_value_heads=4,
++                  max_position_embeddings=2048, rms_norm_eps=1e-5, bos_token_id=1,
++                  eos_token_id=2, pad_token_id=0, tie_word_embeddings=False)
++cfg.mm_vision_tower = CLIP_DIR
++cfg.mm_hidden_size = 64
++cfg.mm_projector_type = "mlp2x_gelu"
++cfg.mm_vision_select_layer = -2
++cfg.mm_vision_select_feature = "patch"
++cfg.mm_use_im_start_end = False
++cfg.mm_use_im_patch_token = False
++cfg.image_aspect_ratio = "pad"
++cfg.use_mm_proj = True
++model = LlavaLlamaForCausalLM(cfg)
++if RESUME:
++    state = torch.load(os.path.join(RESUME, "pytorch_model.bin"), map_location="cpu")
++    print("resume:", model.load_state_dict(state, strict=False))
++projector = model.get_model().mm_projector
++embed = model.get_model().embed_tokens
++
++
++def encode(image_batch):
++    feats = clip(image_batch, output_hidden_states=True).hidden_states[-2][:, 1:]
++    return projector(feats)
++
++
++def render_example(rng, nrng):
++    objs = sample_scene(rng)
++    turns = train_conversation(objs, rng) if TASK == "needles" else conversation(objs, rng, True)
++    conv = conv_templates["llava_v1"].copy()
++    ids, labels, prev = None, None, []
++    for index, (q, a, _) in enumerate(turns):
++        if index == 0:
++            q = q + "\n<image>"
++        conv.append_message(conv.roles[0], q)
++        conv.append_message(conv.roles[1], None)
++        before = tokenizer_image_token(conv.get_prompt(), tok, IMAGE_TOKEN_INDEX)
++        conv.messages[-1][-1] = a
++        after = tokenizer_image_token(conv.get_prompt(), tok, IMAGE_TOKEN_INDEX)
++        assert after[:len(before)] == before, "template not prefix-stable"
++        assert before[:len(prev)] == prev, "turn not prefix-stable"
++        prev = after
++    ids = prev
++    # Labels: assistant answers + "</s>" only.
++    labels = [IGNORE_INDEX] * len(ids)
++    conv2 = conv_templates["llava_v1"].copy()
++    for index, (q, a, _) in enumerate(turns):
++        if index == 0:
++            q = q + "\n<image>"
++        conv2.append_message(conv2.roles[0], q)
++        conv2.append_message(conv2.roles[1], None)
++        start = len(tokenizer_image_token(conv2.get_prompt(), tok, IMAGE_TOKEN_INDEX))
++        conv2.messages[-1][-1] = a
++        end = len(tokenizer_image_token(conv2.get_prompt(), tok, IMAGE_TOKEN_INDEX))
++        for pos in range(start, end):
++            labels[pos] = ids[pos]
++    image = draw(objs, nrng)
++    pixel = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
++    return ids, labels, pixel
++
++
++def collate(examples):
++    pixels = torch.stack([e[2] for e in examples])
++    vis = encode(pixels)                                   # [B, 144, H]
++    seqs, labs = [], []
++    for b, (ids, labels, _) in enumerate(examples):
++        cut = ids.index(IMAGE_TOKEN_INDEX)
++        pre, post = torch.tensor(ids[:cut]), torch.tensor(ids[cut + 1:])
++        seqs.append(torch.cat([embed(pre), vis[b], embed(post)]))
++        labs.append(torch.tensor(labels[:cut] + [IGNORE_INDEX] * vis.shape[1] + labels[cut + 1:]))
++    length = max(s.shape[0] for s in seqs)
++    emb = torch.zeros(len(seqs), length, seqs[0].shape[-1])
++    lab = torch.full((len(seqs), length), IGNORE_INDEX)
++    mask = torch.zeros(len(seqs), length, dtype=torch.long)
++    for b, (s, l) in enumerate(zip(seqs, labs)):
++        emb[b, :s.shape[0]] = s
++        lab[b, :s.shape[0]] = l
++        mask[b, :s.shape[0]] = 1
++    return emb, lab, mask
++
++
++params = list(model.parameters()) + ([] if VISION == "analytic" else list(clip.parameters()))
++opt = torch.optim.AdamW(params, lr=1e-3, weight_decay=0.0, betas=(0.9, 0.98))
++warm = 0 if RESUME else 150
++CONST_LR = os.environ.get("CONST_LR")   # e.g. 5e-4: no cosine decay
++
++
++def lr_at(step):
++    if step < warm:
++        return (step + 1) / warm
++    return 0.5 * (1 + math.cos(math.pi * (step - warm) / max(1, STEPS - warm)))
++
++
++SEED = int(os.environ.get("SEED", 7))   # use a new seed when resuming
++rng, nrng = random.Random(SEED), np.random.default_rng(SEED)
++model.train()
++clip.train(VISION != "analytic")
++t0, running = time.time(), None
++for step in range(STEPS):
++    for group in opt.param_groups:
++        group["lr"] = float(CONST_LR) if CONST_LR else 1e-3 * lr_at(step)
++    emb, lab, mask = collate([render_example(rng, nrng) for _ in range(BATCH)])
++    # LLaVA's wrapper drops inputs_embeds when images=None, so run the decoder
++    # and LM head directly (same computation as the LLaVA forward with labels).
++    hidden = model.get_model()(inputs_embeds=emb, attention_mask=mask, use_cache=False)[0]
++    logits = model.lm_head(hidden)
++    loss = torch.nn.functional.cross_entropy(
++        logits[:, :-1].reshape(-1, logits.shape[-1]), lab[:, 1:].reshape(-1),
++        ignore_index=IGNORE_INDEX)
++    opt.zero_grad(set_to_none=True)
++    loss.backward()
++    torch.nn.utils.clip_grad_norm_(params, 1.0)
++    opt.step()
++    running = loss.item() if running is None else 0.98 * running + 0.02 * loss.item()
++    if step % 50 == 0 or step == STEPS - 1:
++        print(f"step {step} loss {running:.4f} elapsed {time.time() - t0:.0f}s", flush=True)
++    if (step + 1) % 500 == 0 or step == STEPS - 1:
++        model.save_pretrained(LLM_DIR, safe_serialization=False)
++        clip.save_pretrained(CLIP_DIR)
++print("done")
+diff --git a/run-job-rehearsal b/run-job-rehearsal
+new file mode 100644
+index 0000000..d5257b3
+--- /dev/null
++++ b/run-job-rehearsal
+@@ -0,0 +1,75 @@
++#!/bin/bash
++
++#SBATCH --time=48:00:00
++#SBATCH --nodes=1
++#SBATCH --ntasks-per-node=1
++#SBATCH --mem=100G
++#SBATCH --gres=gpu:a100:1
++#SBATCH --partition=nova
++#SBATCH --job-name="rehearsal-kv"
++#SBATCH --error="%j-error"
++#SBATCH --output="%j-rehearsal.out"
++
++# RehearsalKV vs PyramidKV on ConvBench and MultiVerse (LLaVA-1.5-7B).
++# Same evaluator and generation settings as the existing logs, so every new
++# run is compared turn-by-turn against the logged PyramidKV run.
++
++source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
++shopt -s nocaseglob   # existing logs use both "MultiVerse-" and "Multiverse-"
++
++MODEL=/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b
++ROOT=/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache
++CONV_DATA=$ROOT/ConvBench/convbench.json
++CONV_IMG=$ROOT/ConvBench/visit_bench_images
++MV3_DATA=$ROOT/MultiVerse_for_ppl/multiverse_ppl.json        # 3 turns (matches existing logs)
++MV4_DATA=$ROOT/MultiVerse_for_ppl/multiverse_ppl_full.json   # up to 4 turns
++MV_IMG=$ROOT/MultiVerse_raw/images
++
++run () {  # run <tag> <data> <images> <method> <ratio> [extra args...]
++  local TAG=$1 DATA=$2 IMG=$3 METHOD=$4 RATIO=$5; shift 5
++  python eval_rouge_final2.py --model-path $MODEL --data-path $DATA --image-path $IMG \
++      --method $METHOD --ratio $RATIO --output-dir logs_rouge_llava/${TAG}-${RATIO}-${METHOD} "$@"
++}
++
++compare () {  # compare <tag> <ratio>
++  local BASE NEW
++  BASE=$(ls logs_rouge_llava/${1}-${2}-pyramidkv/pyramidkv_ratio${2}_predictions.json 2>/dev/null | head -1)
++  NEW=logs_rouge_llava/${1}-${2}-rehearsal_kv/rehearsal_kv_ratio${2}_predictions.json
++  [ -n "$BASE" ] && [ -f "$NEW" ] && python compare_rouge_runs.py $BASE $NEW \
++      | tee logs_rouge_llava/${1}-${2}-rehearsal_kv/vs_pyramidkv.txt
++}
++
++# 1) Main comparison against the existing PyramidKV logs (ConvBench, MultiVerse 3-turn).
++for RATIO in 0.9 0.8 0.5; do
++  run Convbench  $CONV_DATA $CONV_IMG rehearsal_kv $RATIO; compare Convbench  $RATIO
++  run MultiVerse $MV3_DATA  $MV_IMG   rehearsal_kv $RATIO; compare MultiVerse $RATIO
++done
++
++# 2) 4-turn MultiVerse: no PyramidKV log exists for it yet, so run both.
++for RATIO in 0.9 0.8; do
++  run MultiVerse4 $MV4_DATA $MV_IMG pyramidkv    $RATIO
++  run MultiVerse4 $MV4_DATA $MV_IMG rehearsal_kv $RATIO
++  compare MultiVerse4 $RATIO
++done
++
++# 3) Equal-memory PyramidKV (same pyramid, total exactly L*C) for a fair comparison.
++for RATIO in 0.9 0.8; do
++  run Convbench-exact  $CONV_DATA $CONV_IMG pyramidkv $RATIO --pyramid-exact-budget
++  run MultiVerse-exact $MV3_DATA  $MV_IMG   pyramidkv $RATIO --pyramid-exact-budget
++  for DS in Convbench MultiVerse; do
++    python compare_rouge_runs.py \
++        logs_rouge_llava/${DS}-exact-${RATIO}-pyramidkv/pyramidkv_ratio${RATIO}_exact_predictions.json \
++        logs_rouge_llava/${DS}-${RATIO}-rehearsal_kv/rehearsal_kv_ratio${RATIO}_predictions.json \
++        | tee logs_rouge_llava/${DS}-${RATIO}-rehearsal_kv/vs_pyramidkv_exact.txt
++  done
++done
++
++# 4) Ablations at ratio 0.9: drop one rehearsal act at a time; uniform layer budgets.
++for ACTS in "recall,explore,respond" "revisit,explore,respond" "revisit,recall,respond" "revisit,recall,explore"; do
++  run Convbench-ablation  $CONV_DATA $CONV_IMG rehearsal_kv 0.9 --rehearsal-acts "$ACTS"
++  run MultiVerse-ablation $MV3_DATA  $MV_IMG   rehearsal_kv 0.9 --rehearsal-acts "$ACTS"
++done
++run Convbench-ablation  $CONV_DATA $CONV_IMG rehearsal_kv 0.9 --rehearsal-allocation uniform
++run MultiVerse-ablation $MV3_DATA  $MV_IMG   rehearsal_kv 0.9 --rehearsal-allocation uniform
++run Convbench-ablation  $CONV_DATA $CONV_IMG rehearsal_kv 0.9 --rehearsal-aggregation max
++run MultiVerse-ablation $MV3_DATA  $MV_IMG   rehearsal_kv 0.9 --rehearsal-aggregation max
+diff --git a/run-job-turncast b/run-job-turncast
+new file mode 100644
+index 0000000..54d11eb
+--- /dev/null
++++ b/run-job-turncast
+@@ -0,0 +1,110 @@
++#!/bin/bash
++
++#SBATCH --time=48:00:00
++#SBATCH --nodes=1
++#SBATCH --ntasks-per-node=1
++#SBATCH --mem=100G
++#SBATCH --gres=gpu:a100:1
++#SBATCH --partition=nova
++#SBATCH --job-name="turncast-kv"
++#SBATCH --error="%j-error"
++#SBATCH --output="%j-turncast.out"
++
++# TurnCast-KV on LLaVA-1.5-7B: collect -> train -> offline check -> end-to-end vs PyramidKV.
++#
++#   sbatch run-job-turncast                                  # everything, ratios 0.9 0.8 0.5
++#   sbatch --export=ALL,STAGE=prepare run-job-turncast       # collect + train + offline check (~30 min)
++#   sbatch --export=ALL,STAGE=eval,RATIOS=0.9 run-job-turncast   # one ratio per job, in parallel
++#
++# Training uses 200 conversations of each dataset; every end-to-end run below is
++# on the HELD-OUT conversations (turncast_data/<dataset>/heldout.json), with
++# PyramidKV re-run on exactly the same conversations, so compare_rouge_runs.py
++# pairs every turn.
++
++source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
++
++STAGE=${STAGE:-all}
++RATIOS=${RATIOS:-"0.9 0.8 0.5"}
++MODEL=/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b
++ROOT=/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache
++CONV_DATA=$ROOT/ConvBench/convbench.json
++CONV_IMG=$ROOT/ConvBench/visit_bench_images
++MV_DATA=$ROOT/MultiVerse_for_ppl/multiverse_ppl_full.json
++MV_IMG=$ROOT/MultiVerse_raw/images
++DATA_DIR=turncast_data
++SCORER=$DATA_DIR/turncast_scorer.pt
++
++collect () {  # collect <dataset> <data> <images> [extra]
++  python turncast/collect.py --model-path $MODEL --data-path $2 --image-path $3 \
++      --dataset $1 --out-dir $DATA_DIR --train-count 200 --seed 0 "${@:4}"
++}
++
++if [ "$STAGE" = all ] || [ "$STAGE" = prepare ]; then
++  # 1) Training data: 200 conversations per dataset, one teacher-forced pass each.
++  collect convbench  $CONV_DATA $CONV_IMG
++  collect multiverse $MV_DATA   $MV_IMG
++  # Held-out conversations for the offline check only (the end-to-end runs use all of them).
++  collect convbench  $CONV_DATA $CONV_IMG --split heldout --limit 60
++  collect multiverse $MV_DATA   $MV_IMG   --split heldout --limit 60
++
++  # 2) Train the forecaster; 3) offline check against PyramidKV on held-out data.
++  python turncast/train.py \
++      --train-dirs $DATA_DIR/convbench/train $DATA_DIR/multiverse/train \
++      --eval-dirs  $DATA_DIR/convbench/heldout $DATA_DIR/multiverse/heldout \
++      --out $SCORER | tee $DATA_DIR/train_log.txt
++fi
++
++[ "$STAGE" = prepare ] && exit 0
++[ -f $SCORER ] || { echo "missing $SCORER: run STAGE=prepare first"; exit 1; }
++
++# 4) End-to-end ROUGE on held-out conversations.
++run () {  # run <tag> <data> <images> <method> <ratio> [extra args...]
++  local TAG=$1 DATA=$2 IMG=$3 METHOD=$4 RATIO=$5; shift 5
++  python eval_rouge_final2.py --model-path $MODEL --data-path $DATA --image-path $IMG \
++      --method $METHOD --ratio $RATIO --output-dir logs_rouge_llava/turncast/${TAG}-${RATIO} "$@"
++}
++compare () {  # compare <tag> <ratio> <baseline file stem> <new file stem>
++  local DIR=logs_rouge_llava/turncast/${1}-${2}
++  python compare_rouge_runs.py $DIR/${3}_predictions.json $DIR/${4}_predictions.json \
++      | tee $DIR/${4}_vs_${3}.txt
++}
++
++for RATIO in $RATIOS; do
++  for DS in convbench multiverse; do
++    if [ $DS = convbench ]; then IMG=$CONV_IMG; else IMG=$MV_IMG; fi
++    HELD=$DATA_DIR/$DS/heldout.json
++    run $DS $HELD $IMG pyramidkv   $RATIO                                 # the logged baseline
++    run $DS $HELD $IMG pyramidkv   $RATIO --pyramid-exact-budget          # same memory as TurnCast
++    run $DS $HELD $IMG turncast_kv $RATIO --turncast-scorer $SCORER
++    compare $DS $RATIO pyramidkv_ratio${RATIO}       turncast_kv_ratio${RATIO}
++    compare $DS $RATIO pyramidkv_ratio${RATIO}_exact turncast_kv_ratio${RATIO}
++    # ablation: the forecaster at turn boundaries too (default: PyramidKV's window rule there)
++    run $DS $HELD $IMG turncast_kv $RATIO --turncast-scorer $SCORER --turncast-boundary forecast
++    compare $DS $RATIO pyramidkv_ratio${RATIO}_exact turncast_kv_ratio${RATIO}_boundary-forecast
++    compare $DS $RATIO turncast_kv_ratio${RATIO} turncast_kv_ratio${RATIO}_boundary-forecast
++  done
++done
++
++# 5) Perplexity of the reference answers (the protocol the forecaster was trained on).
++for RATIO in $RATIOS; do
++  for DS in convbench multiverse; do
++    if [ $DS = convbench ]; then IMG=$CONV_IMG; else IMG=$MV_IMG; fi
++    HELD=$DATA_DIR/$DS/heldout.json
++    for SPEC in "pyramidkv" "pyramidkv --pyramid-exact-budget" "turncast_kv --turncast-scorer $SCORER" \
++                "turncast_kv --turncast-scorer $SCORER --turncast-boundary forecast"; do
++      set -- $SPEC
++      NAME=$1; [ "$2" = --pyramid-exact-budget ] && NAME=pyramidkv_exact
++      [ "$4" = --turncast-boundary ] && NAME=turncast_kv_boundary-forecast
++      python eval_ppl_final.py --model-path $MODEL --data-path $HELD --image-path $IMG \
++          --method "$@" --ratio $RATIO --output-dir logs_ppl_llava/turncast \
++          --eval-samples 100000 --exp-name ${DS}-${NAME}-${RATIO}
++    done
++  done
++done
++
++# 6) Overhead: same efficiency benchmark as the other methods.
++if [ "$STAGE" = all ]; then
++  python eval_efficiency.py --model-path $MODEL --data-path $CONV_DATA --image-path $CONV_IMG \
++      --methods pyramidkv turncast_kv --turncast-scorer $SCORER --ratios 0.9 \
++      --context-lengths native --num-samples 20 --output-dir logs_efficiency/turncast
++fi
+diff --git a/turncast/README.md b/turncast/README.md
+new file mode 100644
+index 0000000..146844a
+--- /dev/null
++++ b/turncast/README.md
+@@ -0,0 +1,154 @@
++# TurnCast-KV: learned forecast of what a conversation will read
++
++TurnCast-KV is a multi-turn KV-cache eviction method for LLaVA. A small trained
++model (about 15k parameters) predicts which image patches and earlier text
++tokens the rest of the conversation will attend to. The cache keeps those
++entries. Nothing extra is generated or run at inference: the forecaster reads
++statistics that the normal forward passes already produce.
++
++## Why
++
++The evaluators compress the cache at two kinds of point, always before the
++next question is known:
++
++* right after the Turn-1 prefill;
++* at every turn boundary.
++
++The Turn-1 compression decides which of the 576 visual tokens survive for the
++whole conversation. PyramidKV makes that decision from the attention of the
++last 8 prompt tokens. The prompt is `USER: Q1\n<image> ASSISTANT:`, so those
++8 tokens are 3 image patches and ` ASSISTANT:`. Because Q1 comes before the
++image, none of those 8 tokens knows what Q1 asked or what later turns will ask.
++
++## How
++
++1. **Collect** (`collect.py`). Run one teacher-forced pass of the frozen LLaVA
++   per conversation (no generation). At every compression point, record two
++   things for each cached entry:
++   * the free inputs: attention from this turn's question rows, answer rows
++     and last 8 rows; the peak attention in earlier turns; the same signals
++     averaged over heads and over layers, and max-pooled over image/text
++     neighbours; key and value norms; segment, turn age, recency and image
++     position.
++   * the target: the attention that the REST of the conversation actually
++     paid to that entry.
++
++   Use 200 conversations per dataset. The other conversations become
++   `heldout.json`, which the end-to-end runs use.
++2. **Train** (`train.py`). Fit a 2-layer MLP (64 hidden units) with a
++   per-(layer, head) embedding, using listwise KL against the target. The
++   training settings are fixed: 8 epochs, AdamW, lr 2e-3, keeping the best
++   validation epoch. Training takes minutes.
++3. **Evict** (`kv_cache_turncast.py`, `--method turncast_kv`).
++   * At the Turn-1 compression, every head keeps its top-B_l entries by
++     forecast score. The budget B_l is PyramidKV's linear pyramid, with an
++     exact total of L × C. The attention sink is always kept.
++   * At turn boundaries, the default (`--turncast-boundary window`) applies
++     PyramidKV's window rule with the same budgets. `--turncast-boundary
++     forecast` uses the forecaster there too; see the results below.
++
++Hyperparameters: `--ratio` only. The forecaster's training settings are fixed,
++and the window size (8) and pooling (7) are PyramidKV's standard values, used
++only at boundaries.
++
++## Cost
++
++| | PyramidKV | TurnCast-KV |
++|---|---|---|
++| Model passes | prefill + 1 per token | same |
++| Attention maps read | prefill + decoding | same |
++| Extra work | none | features + MLP at each compression point |
++
++By default the forecaster runs once per conversation. For LLaVA-7B that is
++about 0.67M entries and about 9 GFLOPs, which is less than one decoding step.
++`bench_overhead.py` measures the cache code alone at LLaVA-7B shapes.
++
++## Run on Nova
++
++```bash
++sbatch --export=ALL,STAGE=prepare run-job-turncast           # collect + train + offline check (~30 min)
++sbatch --export=ALL,STAGE=eval,RATIOS=0.9 run-job-turncast   # one job per ratio, in parallel
++```
++
++The job runs the following on the held-out conversations of both datasets:
++
++* PyramidKV, PyramidKV with an exact budget, TurnCast-KV, and TurnCast-KV with
++  `--turncast-boundary forecast`;
++* ROUGE, with paired per-turn bootstrap (`compare_rouge_runs.py`), and PPL;
++* `eval_efficiency.py` for the overhead.
++
++## Tests (`test_turncast.py`, CPU)
++
++* **Train/inference parity.** The features computed online while
++  `eval_ppl_final.py` feeds a conversation token by token match the
++  collector's single-pass features (max difference 6e-4).
++* **Budgets.** Every compression keeps at most L × C entries, and exactly
++  L × C when every layer is long enough. The sink is always kept, and
++  positions stay sorted and unique.
++* **No extra passes.** The number of model forwards is identical to PyramidKV's.
++
++## Results so far (CPU sandbox; LLaVA weights were not reachable)
++
++These come from an 8-layer LLaVA-architecture model trained on synthetic
++multi-turn "needle" conversations. Each needle is one of 144 visual tokens,
++and there are 3 turns. The forecaster was trained on 400 conversations and
++tested on 100 held-out ones. The metric is the perplexity of the reference
++answers; full cache is 1.59.
++
++| ratio | PyramidKV | PyramidKV (exact budget) | **TurnCast-KV** | forecaster at boundaries too | oracle (true future attention) |
++|---|---|---|---|---|---|
++| 0.9 | 12.87 | 12.29 | **4.86** | 7.26 | 5.72 |
++| 0.8 | 1.99 | 1.96 | **1.82** | 1.93 | 1.90 |
++| 0.5 | 1.589 | 1.589 | 1.590 | 1.590 | 1.592 |
++
++Per turn at ratio 0.9 (PyramidKV → TurnCast-KV): turn 1 34.2 → 2.35,
++turn 2 8.40 → 5.79, turn 3 7.41 → 8.44.  Reproduce with `diagnose.py`.
++
++Lessons that shaped the design:
++
++* **The forecaster learns its target.** On held-out conversations it captures
++  97–99% of the future attention that an oracle with the true future
++  attention captures. PyramidKV with an exact budget captures 66–94% (66% at
++  ratio 0.9).
++* **The win is at the Turn-1 compression.** The turn-1 answer perplexity at
++  ratio 0.9 is 2.4 for TurnCast-KV and 33 for PyramidKV. The forecaster keeps
++  Q1's words and the patches that later turns read; PyramidKV's window cannot
++  see them.
++* **At turn boundaries, attention mass is the wrong target in this test.**
++  Even the TRUE future attention lost to PyramidKV's window rule on turn 3.
++  The window rule keeps the just-finished answer, which later answers copy
++  from. Hence the default `boundary=window`.
++* **Two variants were rejected:**
++  * Allocating layer budgets by forecast mass kept more attention mass but
++    starved some layers, and was worse end-to-end at every ratio.
++  * Splitting the boundary budget between the two rules was worse than either
++    rule alone.
++
++The toy model never learned to read its image (chance accuracy with full
++cache), so it cannot show the benefit of keeping image regions for later
++turns at boundaries. Only LLaVA can settle `boundary=forecast` versus
++`boundary=window`.
++
++## Related work
++
++Learned eviction scorers already exist:
++
++* ForesightKV (arXiv 2602.03203) uses an MLP over key, value and attention
++  features, trained on future attention and with RL, for long reasoning
++  traces.
++* LookaheadKV (arXiv 2603.10899) uses PEFT modules that predict importance
++  during prefill.
++* Learning to Evict (arXiv 2602.10238) and TrimKV.
++
++TurnCast-KV differs in three ways:
++
++* **Setting.** It targets multi-turn VLM conversations, and the target is what
++  the later TURNS read.
++* **Inputs.** It uses no raw keys or values. It uses free dialogue-structure
++  signals: turn-wise question and answer attention, cross-turn history, the
++  2-D image neighbourhood, and cross-head and cross-layer consensus. The
++  forecaster is therefore ~15k parameters and is trained from 400
++  conversations with one forward pass each.
++* **Where it is used.** It is applied at the compression that fixes the visual
++  tokens, and it keeps PyramidKV's rule where the toy showed attention mass
++  misleads.
+diff --git a/turncast/bench_overhead.py b/turncast/bench_overhead.py
+new file mode 100644
+index 0000000..942786b
+--- /dev/null
++++ b/turncast/bench_overhead.py
+@@ -0,0 +1,99 @@
++"""Policy-only overhead of TurnCast-KV vs PyramidKV at LLaVA-1.5-7B sizes (no model).
++
++Feeds synthetic attention/KV of the real shapes (32 layers, 32 heads, head dim
++128, 576 image tokens) through both caches: one Turn-1 prefill compression,
++N decoding steps, one turn-boundary compression.  Reports wall time of the
++cache code only (the model forward is identical for both methods).
++Usage: python turncast/bench_overhead.py [--device cuda]
++"""
++import argparse
++import os
++import sys
++import time
++
++import torch
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from kv_cache_pyramidkv import PyramidKVCache  # noqa: E402
++from kv_cache_turncast import TurnCastKVCache, TurnCastScorer  # noqa: E402
++
++
++def sync(device):
++    if device.type == "cuda":
++        torch.cuda.synchronize()
++
++
++def run(cache, layers, heads, prompt, steps, device, dtype, turncast):
++    g = torch.Generator(device="cpu").manual_seed(0)
++    past = [[torch.randn(1, heads, prompt, 128, generator=g).to(device, dtype),
++             torch.randn(1, heads, prompt, 128, generator=g).to(device, dtype)] for _ in range(layers)]
++    if turncast:
++        cache.register_question("q")
++    times = {}
++    observe = 0.0
++    mask = torch.triu(torch.full((prompt, prompt), -1e4, device=device), 1)
++    for layer in range(layers):
++        att = torch.softmax(torch.randn(1, heads, prompt, prompt, device=device) + mask, -1).to(dtype)
++        sync(device)
++        t = time.perf_counter()
++        cache.observe_layer(layer, att)
++        sync(device)
++        observe += time.perf_counter() - t
++    t1 = time.perf_counter()
++    past = cache(past, num_of_token=prompt, attentions=None)
++    sync(device)
++    t2 = time.perf_counter()
++    times["prefill_observe_s"] = observe
++    times["prefill_compress_s"] = t2 - t1
++    if turncast:
++        cache.begin_answer()
++    n = prompt
++    decode = 0.0
++    for _ in range(steps):
++        past = [[torch.cat([k, k[:, :, -1:]], 2), torch.cat([v, v[:, :, -1:]], 2)] for k, v in past]
++        n += 1
++        atts = tuple(torch.softmax(torch.randn(1, heads, 1, k.shape[2], device=device), -1).to(dtype)
++                     for k, _ in past)
++        sync(device)
++        t = time.perf_counter()
++        past = cache(past, num_of_token=n, attentions=atts)
++        sync(device)
++        decode += time.perf_counter() - t
++    times["decode_per_step_ms"] = 1000 * decode / steps
++    sync(device)
++    t = time.perf_counter()
++    past = cache.finalize_turn(past)
++    sync(device)
++    times["boundary_compress_s"] = time.perf_counter() - t
++    times["kv_after_mean"] = sum(k.shape[2] for k, _ in past) / layers
++    return times
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--device", default="cpu")
++    p.add_argument("--steps", type=int, default=128)
++    p.add_argument("--ratio", type=float, default=0.9)
++    args = p.parse_args()
++    device = torch.device(args.device)
++    dtype = torch.float16 if device.type == "cuda" else torch.float32
++    layers, heads, prompt = 32, 32, 640
++    scorer = TurnCastScorer(layers, heads)
++    params = sum(x.numel() for x in scorer.parameters())
++    pyramid = PyramidKVCache(layer_num=layers, ratio=args.ratio, exact_budget=True)
++    turncast = TurnCastKVCache(layers, args.ratio, scorer=scorer, image_start=35, image_token_len=576)
++    turncast.attach_model(torch.nn.Linear(1, 1).to(device))
++    a = run(pyramid, layers, heads, prompt, args.steps, device, dtype, False)
++    b = run(turncast, layers, heads, prompt, args.steps, device, dtype, True)
++    print(f"device {device}, ratio {args.ratio}, forecaster parameters {params}")
++    print(f"{'':24}{'PyramidKV':>12}{'TurnCast':>12}")
++    for key in a:
++        print(f"{key:24}{a[key]:12.4f}{b[key]:12.4f}")
++    entries = turncast.scored_entries
++    macs = (31 + 8) * 64 + 64 * 64 + 64
++    print(f"forecaster: {entries} entries scored over 2 compressions, ~{2 * macs * entries / 1e9:.2f} GFLOPs "
++          f"(one LLaVA-7B decoding step is ~14 GFLOPs)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/turncast/collect.py b/turncast/collect.py
+new file mode 100644
+index 0000000..78f76f3
+--- /dev/null
++++ b/turncast/collect.py
+@@ -0,0 +1,351 @@
++"""
++Collect TurnCast-KV training data: forecaster inputs and next-turn attention targets.
++
++ONE teacher-forced forward pass per conversation (no generation, no cache
++compression).  Under a full cache, the attention that turn t's tokens pay to an
++earlier entry is the same whether the conversation is fed token by token (as the
++evaluators do) or in one pass, so a single pass with output attentions yields:
++
++  * inputs: at every compression point (after the Turn-1 prefill and after each
++    answer), the running statistics LayerStats keeps online (same class, same
++    code as kv_cache_turncast.TurnCastKVCache);
++  * targets: the mean attention each later turn pays to every entry that exists
++    at that point (each later turn weighted equally; for the prefill point the
++    Turn-1 answer is the first "later turn"), normalized per (layer, head).
++
++The conversation is rendered exactly like eval_ppl_final.py (same template, same
++prefix-diff tokenization, reference answers).  To save space, every
++conversation stores a random subset of heads per layer (--heads-per-layer); the
++cross-head consensus inputs are computed from all heads before subsampling.
++
++Split: conversations are shuffled with --seed; the first --train-count form the
++training split, the rest the held-out split.  <out>/<dataset>/train.json and
++heldout.json are written in the evaluator's input format, so the end-to-end
++comparison runs on conversations the forecaster never saw.
++
++Usage (Nova, one GPU, ~1 s per conversation for LLaVA-1.5-7B):
++    python turncast/collect.py --model-path $MODEL --data-path ConvBench/convbench.json \
++        --image-path $ROOT/ConvBench/visit_bench_images --dataset convbench --out-dir turncast_data
++    python turncast/collect.py ... --split heldout --limit 60      # for the offline check
++"""
++import argparse
++import json
++import os
++import random
++import sys
++import time
++
++import torch
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++
++from kv_cache_turncast import (  # noqa: E402
++    LayerStats, SEG_ID, layer_consensus, prompt_segments, pyramid_budgets,
++)
++
++
++def parse_args():
++    p = argparse.ArgumentParser()
++    p.add_argument("--model-path", required=True)
++    p.add_argument("--model-base", default=None)
++    p.add_argument("--data-path", required=True)
++    p.add_argument("--image-path", required=True)
++    p.add_argument("--dataset", required=True, help="name used for the output folder")
++    p.add_argument("--out-dir", default="turncast_data")
++    p.add_argument("--split", choices=["train", "heldout"], default="train")
++    p.add_argument("--train-count", type=int, default=200)
++    p.add_argument("--seed", type=int, default=0)
++    p.add_argument("--limit", type=int, default=None, help="collect at most this many conversations")
++    p.add_argument("--heads-per-layer", type=int, default=8)
++    p.add_argument("--max-length", type=int, default=2048, help="model context; later turns are dropped")
++    p.add_argument("--answers-from", default=None,
++                   help="optional eval_rouge_final2 predictions JSON: use generated answers, not references")
++    p.add_argument("--simulate-ratios", default="",
++                   help="comma list, e.g. 0,0.5,0.8,0.9: each conversation is replayed under one of these "
++                        "compression ratios (0 = full cache); default: full cache only")
++    p.add_argument("--label-agg", choices=["mean", "max"], default="mean",
++                   help="target per later turn: mean or peak attention of its tokens")
++    p.add_argument("--conv-mode", default=None)
++    p.add_argument("--device", default="cuda")
++    p.add_argument("--image-aspect-ratio", default="pad")
++    return p.parse_args()
++
++
++# ----------------------------------------------------------------------
++# Rendering (identical to eval_ppl_final.py's turn loop)
++# ----------------------------------------------------------------------
++def render(item, tokenizer, conv_mode, answers=None):
++    from eval_ppl_final import answer_only_prompt, require_prefix, tokenize_conversation_prompt
++    from llava.constants import DEFAULT_IMAGE_TOKEN
++    from llava.conversation import conv_templates
++
++    conv = conv_templates[conv_mode].copy()
++    committed, turns = None, []
++    for t, turn in enumerate(item["turns"]):
++        question = turn["question"]
++        answer = answers[t] if answers is not None else turn["answer"]
++        if t == 0 and DEFAULT_IMAGE_TOKEN not in question:
++            question = question + "\n" + DEFAULT_IMAGE_TOKEN
++        conv.append_message(conv.roles[0], question)
++        conv.append_message(conv.roles[1], None)
++        base_prompt = conv.get_prompt()
++        base_ids = tokenize_conversation_prompt(base_prompt, tokenizer, "cpu")
++        if t > 0:
++            require_prefix(base_ids, committed, description=f"turn {t}")
++        q_start = 0 if t == 0 else committed.shape[1]
++        with_answer = conv.copy()
++        with_answer.messages[-1][-1] = answer
++        prompt_with_answer = with_answer.get_prompt()
++        through = answer_only_prompt(base_prompt, prompt_with_answer, answer)
++        ids_through = tokenize_conversation_prompt(through, tokenizer, "cpu")
++        ids_full = tokenize_conversation_prompt(prompt_with_answer, tokenizer, "cpu")
++        require_prefix(ids_through, base_ids, description=f"turn {t} answer")
++        require_prefix(ids_full, ids_through, description=f"turn {t} separator")
++        turns.append({"q": (q_start, base_ids.shape[1]), "a": (base_ids.shape[1], ids_full.shape[1])})
++        conv, committed = with_answer, ids_full
++    return committed, turns
++
++
++def expand(turns, image_pos, image_len, max_length):
++    """Map token-id ranges to expanded KV positions; drop turns beyond max_length."""
++    shift = image_len - 1
++
++    def e(x):
++        return x if x <= image_pos else x + shift
++
++    out = []
++    for turn in turns:
++        q = (e(turn["q"][0]) if turn["q"][0] > 0 else 0, e(turn["q"][1]))
++        a = (e(turn["a"][0]), e(turn["a"][1]))
++        if a[1] > max_length:
++            break
++        out.append({"q": q, "a": a})
++    return out
++
++
++def segments(turns, image_start, image_len):
++    prompt_len = turns[0]["q"][1]
++    seg = prompt_segments(prompt_len, image_start, image_len)
++    turn_of = [0] * prompt_len
++    for t, turn in enumerate(turns):
++        if t > 0:
++            seg += [SEG_ID["user"]] * (turn["q"][1] - turn["q"][0])
++            turn_of += [t] * (turn["q"][1] - turn["q"][0])
++        seg += [SEG_ID["assistant"]] * (turn["a"][1] - turn["a"][0])
++        turn_of += [t] * (turn["a"][1] - turn["a"][0])
++    return seg, turn_of
++
++
++def boundaries(turns):
++    """Compression points with at least one later turn: (stage, turn, size, future row blocks)."""
++    points = [("prefill", 0, turns[0]["q"][1], [turns[0]["a"]] + [(t["q"][0], t["a"][1]) for t in turns[1:]])]
++    for t in range(len(turns) - 1):
++        future = [(u["q"][0], u["a"][1]) for u in turns[t + 1:]]
++        points.append(("turn", t, turns[t]["a"][1], future))
++    return points
++
++
++# ----------------------------------------------------------------------
++# Per-layer replay of the online statistics
++# ----------------------------------------------------------------------
++def make_sink(turns, points, heads_subset, store, n_layers, sim_ratio=None, dtype=torch.float16,
++              label_agg="mean"):
++    """Called by the attention hook with each layer's [1, H, N, N] attention.
++
++    Replays the conversation through LayerStats exactly as TurnCastKVCache sees
++    it.  With sim_ratio, the cache is also COMPRESSED at every compression point
++    (oracle top-k under the evaluator's budget), and later attention rows are
++    restricted to the surviving entries and renormalized, so the forecaster also
++    learns from the pruned histories it meets at inference (later turns).
++    """
++
++    def sink(layer_idx, attention):
++        att = attention[0]
++        heads, device = att.shape[0], att.device
++        stats = LayerStats(heads, device, att.shape[-1])
++        keep = heads_subset[layer_idx].to(device)
++        results = []
++        lengths = None          # physical length of every layer (same bookkeeping in each layer)
++
++        def add(start, end):
++            nonlocal lengths
++            if end <= start:
++                return
++            index = torch.cat([stats.pos[:, : stats.n],
++                               torch.arange(start, end, device=device).expand(heads, -1)], dim=1)
++            rows = att[:, start:end, :].gather(2, index[:, None, :].expand(heads, end - start, -1)).float()
++            rows = rows / rows.sum(dim=-1, keepdim=True).clamp(min=1e-12)
++            stats.add_block(rows, torch.arange(start, end))
++            if lengths is not None:
++                lengths = [length + end - start for length in lengths]
++
++        def boundary(stage, turn_now, size, future):
++            nonlocal lengths
++            n = stats.n
++            snap = stats.snapshot(n)
++            cons, present = layer_consensus(snap, size)
++            pos = snap["pos"]
++            blocks = [att[:, s:e, :].gather(2, pos[:, None, :].expand(heads, e - s, n)).float()
++                      for s, e in future if e > s]
++            # per later turn: mean (or peak) attention of its tokens; turns weighted equally
++            blocks = [b.amax(dim=1) if label_agg == "max" else b.mean(dim=1) for b in blocks]
++            label = torch.stack(blocks).mean(0)
++            label = label / label.sum(dim=-1, keepdim=True).clamp(min=1e-12)
++            results.append({
++                "q": snap["q"][keep].to(dtype).cpu(), "a": snap["a"][keep].to(dtype).cpu(),
++                "w": snap["w"][keep].to(dtype).cpu(), "h": snap["h"][keep].to(dtype).cpu(),
++                "q_has": snap["q_has"][keep].cpu(), "a_has": snap["a_has"][keep].cpu(),
++                "h_has": snap["h_has"][keep].cpu(), "pos": pos[keep].int().cpu(),
++                "cons": cons.to(dtype).cpu(), "present": present.cpu(), "label": label[keep].cpu(),
++            })
++            if stage == "turn":
++                stats.end_turn(n)
++            if sim_ratio:
++                if lengths is None:
++                    lengths = [n] * n_layers
++                budgets = pyramid_budgets(n_layers, sim_ratio, size, lengths)
++                if budgets is not None:
++                    if budgets[layer_idx] < n:
++                        score = label.clone()
++                        score[pos == 0] = float("inf")
++                        stats.gather(score.topk(budgets[layer_idx], dim=-1).indices.sort(dim=-1).values)
++                    lengths = [min(b, length) for b, length in zip(budgets, lengths)]
++            stats.reset_window()
++
++        point = 0
++        for t, turn in enumerate(turns):
++            if point >= len(points):
++                break
++            stats.set_phase("q")
++            add(*turn["q"])
++            if t == 0:
++                boundary(*points[0])
++                point = 1
++            stats.set_phase("a")
++            add(*turn["a"])
++            if point < len(points):
++                boundary(*points[point])
++                point += 1
++        store[layer_idx] = results
++
++    return sink
++
++
++def main():
++    args = parse_args()
++    from eval_ppl_final import choose_conversation_mode, load_image
++    from llava.constants import IMAGE_TOKEN_INDEX
++    from llava.mm_utils import get_model_name_from_path, process_images
++    from llava.model.builder import load_pretrained_model
++    from tgv_kv_legacy_nova import enable_online_attention, online_attention
++
++    data = json.load(open(args.data_path))
++    order = list(range(len(data)))
++    random.Random(args.seed).shuffle(order)
++    split = {"train": sorted(order[: args.train_count]), "heldout": sorted(order[args.train_count:])}
++    out_root = os.path.join(args.out_dir, args.dataset)
++    os.makedirs(os.path.join(out_root, args.split), exist_ok=True)
++    json.dump({"seed": args.seed, "train_count": args.train_count, **split},
++              open(os.path.join(out_root, "split.json"), "w"))
++    for name in ("train", "heldout"):
++        json.dump([data[i] for i in split[name]], open(os.path.join(out_root, f"{name}.json"), "w"))
++
++    answers_by_key = None
++    if args.answers_from:
++        answers_by_key = {}
++        for item in json.load(open(args.answers_from))["results"]:
++            key = (item["image"], item["turns"][0]["question"])
++            answers_by_key[key] = [turn["prediction"] for turn in item["turns"]]
++
++    model_name = get_model_name_from_path(args.model_path)
++    tokenizer, model, image_processor, _ = load_pretrained_model(
++        args.model_path, args.model_base, model_name, False, False, device=args.device)
++    if args.device == "cpu":
++        model = model.float()
++        model.get_vision_tower().to(dtype=torch.float32)
++    model.eval()
++    enable_online_attention(model)
++    conv_mode = choose_conversation_mode(model_name, args.conv_mode)
++    n_layers = model.config.num_hidden_layers
++    n_heads = model.config.num_key_value_heads if hasattr(model.config, "num_key_value_heads") else model.config.num_attention_heads
++    if n_heads != model.config.num_attention_heads:
++        raise NotImplementedError("collector assumes one query head per KV head (LLaVA-1.5)")
++    image_len = int(model.get_vision_tower().num_patches)
++    heads_per_layer = min(args.heads_per_layer, n_heads)
++
++    indices = split[args.split][: args.limit]
++    sim_ratios = [float(r) for r in args.simulate_ratios.split(",") if r.strip()]
++    rng = random.Random(args.seed + 7)
++    generator = torch.Generator().manual_seed(args.seed + (0 if args.split == "train" else 1))
++    started, written, skipped = time.time(), 0, 0
++    for count, index in enumerate(indices):
++        path = os.path.join(out_root, args.split, f"{index:05d}.pt")
++        if os.path.exists(path):
++            continue
++        item = data[index]
++        answers = None
++        if answers_by_key is not None:
++            answers = answers_by_key.get((item["image"], item["turns"][0]["question"]))
++            if answers is None:
++                skipped += 1
++                continue
++        ids, turns = render(item, tokenizer, conv_mode, answers)
++        image_pos = int((ids[0] == IMAGE_TOKEN_INDEX).nonzero()[0, 0])
++        turns = expand(turns, image_pos, image_len, args.max_length)
++        if not turns:
++            skipped += 1
++            continue
++        end = turns[-1]["a"][1] - (image_len - 1)
++        points = boundaries(turns)
++        heads_subset = [torch.randperm(n_heads, generator=generator)[:heads_per_layer].sort().values
++                        for _ in range(n_layers)]
++        store = {}
++        sim_ratio = float(rng.choice(sim_ratios)) if sim_ratios else 0.0
++        image = load_image(os.path.join(args.image_path, item["image"]))
++        image_tensor = process_images([image], image_processor, args).to(
++            model.device, dtype=next(model.parameters()).dtype)
++        with torch.no_grad(), online_attention(
++                model, make_sink(turns, points, heads_subset, store, n_layers, sim_ratio or None,
++                label_agg=args.label_agg)):
++            outputs = model(input_ids=ids[:, :end].to(model.device), images=image_tensor,
++                            use_cache=True, output_attentions=True)
++        past = outputs.past_key_values
++        del outputs
++        if past[0][0].shape[2] != turns[-1]["a"][1]:
++            raise RuntimeError(f"item {index}: expanded length {past[0][0].shape[2]} != {turns[-1]['a'][1]}")
++        seg, turn_of = segments(turns, image_pos, image_len)
++        norms = []
++        for layer in range(n_layers):
++            heads = heads_subset[layer].to(past[layer][0].device)
++            norms.append([past[layer][i][0, heads].float().norm(dim=-1).clamp(min=1e-6).log().cpu()
++                          for i in (0, 1)])
++        samples = []
++        for b, (stage, turn_now, size, _) in enumerate(points):
++            layers = []
++            for layer in range(n_layers):
++                entry = store[layer][b]
++                pos = entry["pos"].long()
++                entry["logk"] = norms[layer][0].gather(1, pos).half()
++                entry["logv"] = norms[layer][1].gather(1, pos).half()
++                layers.append(entry)
++            samples.append({"stage": stage, "turn_now": turn_now, "size": size,
++                            "sim_ratio": sim_ratio, "layers": layers})
++        torch.save({
++            "dataset": args.dataset, "index": index, "image": item["image"],
++            "n_layers": n_layers, "n_heads": n_heads, "heads": torch.stack(heads_subset),
++            "image_start": image_pos, "image_len": image_len,
++            "seg": torch.tensor(seg, dtype=torch.int8), "turn": torch.tensor(turn_of, dtype=torch.int8),
++            "samples": samples, "format": 2,
++        }, path)
++        written += 1
++        del past, store
++        if (count + 1) % 10 == 0:
++            rate = (time.time() - started) / (count + 1)
++            print(f"[{args.dataset}/{args.split}] {count + 1}/{len(indices)}  {rate:.2f}s/conv", flush=True)
++    print(f"[{args.dataset}/{args.split}] wrote {written}, skipped {skipped}, "
++          f"{time.time() - started:.0f}s total -> {os.path.join(out_root, args.split)}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/turncast/composition.py b/turncast/composition.py
+new file mode 100644
+index 0000000..d3c6adc
+--- /dev/null
++++ b/turncast/composition.py
+@@ -0,0 +1,84 @@
++"""What does each scoring rule keep?  Share of kept entries per segment and turn age,
++at each compression point (toy diagnostics; same harness as diagnose.py)."""
++import argparse
++import collections
++import os
++import sys
++
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++sys.path.insert(0, os.path.dirname(HERE))
++
++import diagnose  # noqa: E402
++from run_cpu import patched_module  # noqa: E402
++from kv_cache_turncast import SEGMENTS  # noqa: E402
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--model-path", required=True)
++    p.add_argument("--data-path", required=True)
++    p.add_argument("--image-path", required=True)
++    p.add_argument("--scorer", required=True)
++    p.add_argument("--ratio", default="0.9")
++    p.add_argument("--modes", nargs="+", default=["forecast", "window", "oracle"])
++    p.add_argument("--samples", type=int, default=20)
++    args = p.parse_args()
++    torch.set_num_threads(int(os.environ.get("THREADS", 1)))
++    evaluator = patched_module("eval_ppl_final.py")
++    labels = {}
++    if any(m.startswith("oracle") for m in args.modes):
++        labels = {"mean": diagnose.oracle_labels(evaluator, args, "mean")}
++    for mode in args.modes:
++        caches = []
++        original = evaluator.build_cache
++
++        def build(run_args, *a, _mode=mode, **k):
++            cache = original(run_args, *a, **k)
++            cache.record = True
++            if _mode == "window":
++                cache.score_override = lambda c, st, f, s: diagnose.window_scores(s)
++            elif _mode == "oracle":
++                cache.score_override = diagnose.make_oracle(labels["mean"])
++            caches.append(cache)
++            return cache
++
++        evaluator.build_cache = build
++        original_load = evaluator.load_image
++
++        def load_image(path, _orig=original_load):
++            diagnose.current["image"] = os.path.basename(path)
++            diagnose.current["boundary"] = 0
++            return _orig(path)
++
++        evaluator.load_image = load_image
++        sys.argv = ["eval_ppl_final.py", "--model-path", args.model_path, "--data-path", args.data_path,
++                    "--image-path", args.image_path, "--device", "cpu", "--method", "turncast_kv",
++                    "--ratio", args.ratio, "--turncast-scorer", args.scorer, "--output-dir", "/tmp/turncast_comp",
++                    "--exp-name", mode, "--eval-samples", str(args.samples)]
++        evaluator.main(evaluator.parse_cli())
++        evaluator.build_cache, evaluator.load_image = original, original_load
++        shares = collections.defaultdict(lambda: collections.Counter())
++        for cache in caches:
++            seg = torch.tensor(cache.seg)
++            turn = torch.tensor(cache.turn)
++            for b, record in enumerate(cache.records[:-1]):
++                kept = record.get("kept", {})
++                for layer, pos in kept.items():
++                    key = f"point {b} ({record['stage']}, turn {record['turn']})"
++                    for p_ in pos.reshape(-1).tolist():
++                        name = SEGMENTS[int(seg[p_])]
++                        age = record["turn"] - int(turn[p_])
++                        label = name if name in ("sink", "prompt_text", "image") else f"{name}[-{age}]"
++                        shares[key][label] += 1
++        print(f"\n== {mode} @ {args.ratio}: share of kept entries")
++        for key in sorted(shares):
++            total = sum(shares[key].values())
++            parts = ", ".join(f"{k} {v / total:.2f}" for k, v in sorted(shares[key].items()))
++            print(f"  {key}: {parts}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/turncast/diagnose.py b/turncast/diagnose.py
+new file mode 100644
+index 0000000..5a53049
+--- /dev/null
++++ b/turncast/diagnose.py
+@@ -0,0 +1,147 @@
++"""
++Diagnose TurnCast-KV end to end (PPL of reference answers, per turn).
++
++Runs the unchanged eval_ppl_final.py (CPU shims from run_cpu.py) with the
++TurnCast cache and swaps the scoring rule:
++
++  turncast        the method: forecaster at the Turn-1 compression, PyramidKV's
++                  window rule at turn boundaries (boundary="window")
++  forecast-all    forecaster at every compression (boundary="forecast")
++  window          PyramidKV's rule everywhere, same exact budgets (isolates the scorer)
++  oracle          the TRUE future attention of the conversation (full-cache pass)
++                  at every compression: is "future attention" the right target?
++  oracle-max      same, peak instead of mean attention per later turn
++  oracle-val      same, attention x value norm
++
++Usage: python turncast/diagnose.py --model-path M --data-path heldout.json --image-path I \
++           --scorer scorer.pt --ratios 0.9 0.8 --modes turncast forecast-all window oracle
++"""
++import argparse
++import json
++import os
++import sys
++
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++sys.path.insert(0, os.path.dirname(HERE))
++
++import collect  # noqa: E402
++from run_cpu import patched_module  # noqa: E402
++from kv_cache_turncast import window_scores  # noqa: E402
++
++current = {"image": None, "boundary": 0}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--model-path", required=True)
++    p.add_argument("--data-path", required=True)
++    p.add_argument("--image-path", required=True)
++    p.add_argument("--scorer", required=True)
++    p.add_argument("--ratios", nargs="+", default=["0.9"])
++    p.add_argument("--modes", nargs="+", default=["turncast", "forecast-all", "window", "oracle"])
++    p.add_argument("--samples", type=int, default=100)
++    p.add_argument("--out", default="/tmp/turncast_diag")
++    args = p.parse_args()
++    os.makedirs(args.out, exist_ok=True)
++    torch.set_num_threads(int(os.environ.get("THREADS", 2)))
++
++    evaluator = patched_module("eval_ppl_final.py")
++    labels = {}
++    for mode in args.modes:
++        if mode.startswith("oracle"):
++            agg = mode.split("-")[1] if "-" in mode else "mean"
++            labels[mode] = oracle_labels(evaluator, args, agg)
++
++    results = {}
++    for ratio in args.ratios:
++        for mode in args.modes:
++            original = evaluator.build_cache
++
++            def build(run_args, *a, _mode=mode, **k):
++                cache = original(run_args, *a, **k)
++                if _mode == "forecast-all":
++                    cache.boundary = "forecast"
++                elif _mode == "window":
++                    cache.score_override = lambda c, stage, f, s: window_scores(s)
++                elif _mode.startswith("oracle"):
++                    cache.score_override = make_oracle(labels[_mode])
++                return cache
++
++            evaluator.build_cache = build
++            original_load = evaluator.load_image
++
++            def load_image(path, _orig=original_load):
++                current["image"] = os.path.basename(path)
++                current["boundary"] = 0
++                return _orig(path)
++
++            evaluator.load_image = load_image
++            sys.argv = ["eval_ppl_final.py", "--model-path", args.model_path, "--data-path", args.data_path,
++                        "--image-path", args.image_path, "--device", "cpu", "--method", "turncast_kv",
++                        "--ratio", ratio, "--turncast-scorer", args.scorer, "--output-dir", args.out,
++                        "--exp-name", f"{mode}-{ratio}", "--eval-samples", str(args.samples)]
++            evaluator.main(evaluator.parse_cli())
++            evaluator.build_cache = original
++            evaluator.load_image = original_load
++            results[f"{mode}@{ratio}"] = json.load(open(os.path.join(args.out, f"{mode}-{ratio}.json")))
++    print("\nPPL of reference answers (lower is better)")
++    for key, res in results.items():
++        turns = " ".join(f"T{t}={v:.3f}" for t, v in res["per_turn_ppl"].items())
++        print(f"  {key:<20} overall {res['overall_ppl']:.3f}   {turns}")
++
++
++def oracle_labels(evaluator, args, agg):
++    """Full-cache future attention (all heads) at every compression point, per image."""
++    from llava.constants import IMAGE_TOKEN_INDEX
++    from llava.mm_utils import process_images
++    from tgv_kv_legacy_nova import enable_online_attention, online_attention
++    tokenizer, model, processor, _ = evaluator._test_load(args.model_path, None, "llava-v1.5-7b", False, False,
++                                                          device="cpu")
++    enable_online_attention(model)
++    data = json.load(open(args.data_path))[: args.samples]
++    image_len = int(model.get_vision_tower().num_patches)
++    heads, layers = model.config.num_attention_heads, model.config.num_hidden_layers
++    out = {}
++    for item in data:
++        ids, turns = collect.render(item, tokenizer, "llava_v1")
++        image_pos = int((ids[0] == IMAGE_TOKEN_INDEX).nonzero()[0, 0])
++        turns = collect.expand(turns, image_pos, image_len, 10 ** 9)
++        points = collect.boundaries(turns)
++        store = {}
++        image = evaluator.load_image(os.path.join(args.image_path, item["image"]))
++        tensor = process_images([image], processor, argparse.Namespace(image_aspect_ratio="pad")).float()
++        with torch.no_grad(), online_attention(model, collect.make_sink(
++                turns, points, [torch.arange(heads)] * layers, store, layers, dtype=torch.float32,
++                label_agg="max" if agg == "max" else "mean")):
++            past = model(input_ids=ids, images=tensor, use_cache=True, output_attentions=True).past_key_values
++        per_point = []
++        for b in range(len(points)):
++            row = []
++            for layer in range(layers):
++                label = store[layer][b]["label"]
++                if agg == "val":       # attention x value norm
++                    label = label * past[layer][1][0, :, : label.shape[1]].norm(dim=-1)
++                    label = label / label.sum(-1, keepdim=True)
++                row.append(label)
++            per_point.append(row)
++        out[item["image"]] = per_point
++    return out
++
++
++def make_oracle(labels):
++    def score(cache, stage, feats, snaps):
++        per_point = labels[current["image"]]
++        b = current["boundary"]
++        current["boundary"] += 1
++        if b >= len(per_point):            # last boundary: nothing is asked afterwards
++            return [torch.zeros_like(s["q"]) for s in snaps]
++        return [torch.log(per_point[b][layer].gather(1, snap["pos"]) + 1e-12)
++                for layer, snap in enumerate(snaps)]
++    return score
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/turncast/run_cpu.py b/turncast/run_cpu.py
+new file mode 100644
+index 0000000..7272bc3
+--- /dev/null
++++ b/turncast/run_cpu.py
+@@ -0,0 +1,62 @@
++"""Run eval_rouge_final2.py / eval_ppl_final.py on CPU with a small test model.
++
++Test-only shims (the evaluator logic itself is unchanged):
++  1. cast the loaded model to float32 (CPU has no fast fp16 kernels);
++  2. read the layer count from the model config instead of the "7b" -> 32 rule,
++     so small test models build correctly sized caches.
++Usage: python turncast/run_cpu.py eval_ppl_final.py <normal evaluator arguments>
++       (or import patched_module() to drive an evaluator from Python)
++"""
++import os
++import sys
++import types
++
++import torch
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++
++
++def patched_module(script, run_main=False):
++    os.chdir(REPO)
++    source = open(os.path.join(REPO, script)).read()
++    old = 'layer_num = 32 if "7b" in model_name.lower() else 40'
++    assert source.count(old) == 1
++    source = source.replace(old, "layer_num = _TEST_LAYER_NUM")
++    loader = "= load_pretrained_model("
++    assert source.count(loader) == 1
++    source = source.replace(loader, "= _test_load(")
++    name = os.path.splitext(script)[0] + "_cpu"
++    module = types.ModuleType(name)
++    module.__file__ = os.path.join(REPO, script)
++    sys.modules[name] = module
++
++    def _test_load(*args, **kwargs):
++        from llava.model.builder import load_pretrained_model
++
++        tokenizer, model, processor, ctx = load_pretrained_model(*args, **kwargs)
++        model = model.float()
++        model.get_vision_tower().to(dtype=torch.float32)
++        model.eval()
++        module._TEST_LAYER_NUM = int(model.config.num_hidden_layers)
++        return tokenizer, model, processor, ctx
++
++    module._test_load = _test_load
++    module._TEST_LAYER_NUM = None
++    main_block = 'if __name__ == "__main__":'
++    if run_main:
++        source = source.replace(main_block, "if True:")
++    else:
++        # keep the argument parser, skip the run: parse_cli() returns the args
++        head, block = source.split(main_block)
++        block = block.replace("    main(args)", "    return args")
++        source = head + "def parse_cli():" + block
++    exec(compile(source, module.__file__, "exec"), module.__dict__)
++    return module
++
++
++if __name__ == "__main__":
++    torch.set_num_threads(int(os.environ.get("THREADS", 2)))
++    script = sys.argv[1]
++    sys.argv = [script] + sys.argv[2:]
++    patched_module(script, run_main=True)
+diff --git a/turncast/test_turncast.py b/turncast/test_turncast.py
+new file mode 100644
+index 0000000..5f390b3
+--- /dev/null
++++ b/turncast/test_turncast.py
+@@ -0,0 +1,194 @@
++"""
++Correctness checks for TurnCast-KV (CPU, any small LLaVA checkpoint).
++
++1. Train/inference parity: the features TurnCastKVCache computes ONLINE while
++   eval_ppl_final.py feeds a conversation token by token equal the features
++   built OFFLINE from turncast/collect.py's single teacher-forced pass.
++2. Budgets: at ratios 0.9 / 0.5 and both boundary rules, every compression keeps
++   exactly L * C entries (or fewer when a layer is shorter), the attention sink
++   is always kept, and the per-head positions stay sorted and unique.
++3. No extra model passes: the number of model forwards equals PyramidKV's.
++
++Usage: python turncast/test_turncast.py --model-path <llava dir> --data-path <json> --image-path <dir>
++"""
++import argparse
++import os
++import sys
++import types
++
++import torch
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++sys.path.insert(0, os.path.join(REPO, "turncast"))
++os.chdir(REPO)
++
++import eval_ppl_final  # noqa: E402
++import collect  # noqa: E402
++import train  # noqa: E402
++from kv_cache_turncast import FEATURE_NAMES, TurnCastKVCache, TurnCastScorer, save_scorer  # noqa: E402
++
++
++def cpu_loader(*args, **kwargs):
++    from llava.model.builder import load_pretrained_model
++    tokenizer, model, processor, ctx = load_pretrained_model(*args, **kwargs)
++    model = model.float()
++    model.get_vision_tower().to(dtype=torch.float32)
++    return tokenizer, model.eval(), processor, ctx
++
++
++def run_ppl(args, method, ratio, extra=None, items=1):
++    """Run the unchanged eval_ppl_final.main and return the cache objects it built."""
++    caches, forwards = [], [0]
++    original_build = eval_ppl_final.build_cache
++
++    def build(run_args, *a, **k):
++        cache = original_build(run_args, *a, **k)
++        if isinstance(cache, TurnCastKVCache):
++            cache.record = True
++        caches.append(cache)
++        return cache
++
++    eval_ppl_final.build_cache = build
++    eval_ppl_final.load_pretrained_model = cpu_loader
++    parser_args = [
++        "--model-path", args.model_path, "--data-path", args.data_path, "--image-path", args.image_path,
++        "--device", "cpu", "--method", method, "--ratio", str(ratio), "--eval-samples", str(items),
++        "--output-dir", args.work, "--exp-name", f"test_{method}_{ratio}",
++    ] + (extra or [])
++    from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
++    original_forward = LlavaLlamaForCausalLM.forward
++
++    def counting_forward(self, *a, **k):
++        forwards[0] += 1
++        return original_forward(self, *a, **k)
++
++    LlavaLlamaForCausalLM.forward = counting_forward
++    try:
++        sys.argv = ["eval_ppl_final.py"] + parser_args
++        ns = eval_ppl_final_parse()
++        eval_ppl_final.main(ns)
++    finally:
++        LlavaLlamaForCausalLM.forward = original_forward
++        eval_ppl_final.build_cache = original_build
++    return caches, forwards[0]
++
++
++def eval_ppl_final_parse():
++    """Parse sys.argv with eval_ppl_final.py's own __main__ argument parser."""
++    import textwrap
++    source = open(os.path.join(REPO, "eval_ppl_final.py")).read()
++    block = source[source.index('if __name__ == "__main__":'):].split("\n", 1)[1]
++    captured = {}
++    namespace = dict(eval_ppl_final.__dict__)
++    namespace["main"] = lambda parsed: captured.setdefault("args", parsed)
++    exec(textwrap.dedent(block), namespace)
++    return captured["args"]
++
++
++def parity(args):
++    caches, _ = run_ppl(args, "turncast_kv", 0.0)
++    cache = caches[0]
++    online = cache.records
++
++    # Offline: the collector's single pass over the same conversation.
++    from llava.mm_utils import process_images
++    from llava.model.builder import load_pretrained_model  # noqa: F401
++    import json
++    item = json.load(open(args.data_path))[0]
++    tokenizer, model, processor, _ = cpu_loader(args.model_path, None, "llava-v1.5-7b", False, False, device="cpu")
++    from tgv_kv_legacy_nova import enable_online_attention, online_attention
++    from llava.constants import IMAGE_TOKEN_INDEX
++    enable_online_attention(model)
++    ids, turns = collect.render(item, tokenizer, "llava_v1")
++    image_len = int(model.get_vision_tower().num_patches)
++    image_pos = int((ids[0] == IMAGE_TOKEN_INDEX).nonzero()[0, 0])
++    turns = collect.expand(turns, image_pos, image_len, 10 ** 9)
++    points = collect.boundaries(turns)
++    heads = model.config.num_attention_heads
++    layers = model.config.num_hidden_layers
++    subset = [torch.arange(heads) for _ in range(layers)]
++    store = {}
++    image = eval_ppl_final.load_image(os.path.join(args.image_path, item["image"]))
++    image_tensor = process_images([image], processor, types.SimpleNamespace(image_aspect_ratio="pad"))
++    with torch.no_grad(), online_attention(
++            model, collect.make_sink(turns, points, subset, store, layers, dtype=torch.float32)):
++        out = model(input_ids=ids, images=image_tensor.float(), use_cache=True, output_attentions=True)
++    past = out.past_key_values
++    seg, turn_of = collect.segments(turns, image_pos, image_len)
++    conv = {"n_layers": layers, "n_heads": heads, "heads": torch.stack(subset), "image_start": image_pos,
++            "image_len": image_len, "seg": torch.tensor(seg), "turn": torch.tensor(turn_of)}
++    worst = 0.0
++    if len(online) < len(points):
++        raise AssertionError(f"online recorded {len(online)} compression points, offline {len(points)}")
++    for b, (stage, turn_now, size, _) in enumerate(points):
++        per_layer = []
++        for l in range(layers):
++            entry = dict(store[l][b])
++            pos = entry["pos"].long()
++            entry["logk"] = past[l][0][0].norm(dim=-1).log().gather(1, pos)
++            entry["logv"] = past[l][1][0].norm(dim=-1).log().gather(1, pos)
++            per_layer.append(entry)
++        sample = {"stage": stage, "turn_now": turn_now, "size": size, "layers": per_layer}
++        offline = train.sample_features(conv, sample, torch.device("cpu"))
++        record = online[b]
++        if record["stage"] != stage or record["n_logical"] != size:
++            raise AssertionError(f"point {b}: online {record['stage']}@{record['n_logical']} vs offline {stage}@{size}")
++        diff = torch.stack([(on - off).abs().amax(dim=(0, 1)) for on, off in zip(record["features"], offline)])
++        per_feature = diff.amax(0)
++        worst = max(worst, float(per_feature.max()))
++        bad = [(FEATURE_NAMES[i], float(per_feature[i])) for i in range(len(FEATURE_NAMES)) if per_feature[i] > 1e-3]
++        print(f"  point {b} ({stage}, {size} entries): max |online - offline| = {float(per_feature.max()):.2e}"
++              + (f"  OFF: {bad}" if bad else ""))
++        if bad:
++            raise AssertionError(f"feature mismatch at point {b}: {bad}")
++    print(f"[ok] train/inference parity over {len(points)} compression points (max diff {worst:.1e})")
++
++
++def budgets(args):
++    layers = 32
++    scorer_path = os.path.join(args.work, "random_scorer.pt")
++    import json
++    from llava.model.builder import load_pretrained_model  # noqa: F401
++    cfg = json.load(open(os.path.join(args.model_path, "config.json")))
++    layers, heads = cfg["num_hidden_layers"], cfg["num_key_value_heads"]
++    torch.manual_seed(0)
++    save_scorer(TurnCastScorer(layers, heads), scorer_path)
++    _, pyramid_forwards = run_ppl(args, "pyramidkv", 0.9, ["--pyramid-exact-budget"])
++    for ratio in (0.9, 0.5):
++        for boundary in ("window", "forecast"):
++            caches, forwards = run_ppl(args, "turncast_kv", ratio,
++                                       ["--turncast-scorer", scorer_path, "--turncast-boundary", boundary])
++            cache = caches[0]
++            if ratio == 0.9 and forwards != pyramid_forwards:
++                raise AssertionError(f"turncast ran {forwards} model forwards, PyramidKV {pyramid_forwards}")
++            stats = cache.last_finalize_stats
++            capacity = stats["target_per_layer"]
++            kept = stats["layer_budgets"]
++            if sum(kept) > layers * capacity:
++                raise AssertionError(f"kept {sum(kept)} > {layers} x {capacity}")
++            for layer, st in enumerate(cache.stats):
++                pos = st.pos[:, : st.n]
++                if not bool((pos[:, 0] == 0).all()):
++                    raise AssertionError(f"layer {layer}: sink evicted")
++                if not bool((pos[:, 1:] > pos[:, :-1]).all()):
++                    raise AssertionError(f"layer {layer}: positions not strictly increasing")
++            print(f"[ok] ratio {ratio} boundary {boundary}: last compression kept {sum(kept)} "
++                  f"(L x C = {layers * capacity}), layers {min(kept)}..{max(kept)}, forwards {forwards}")
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--model-path", required=True)
++    p.add_argument("--data-path", required=True)
++    p.add_argument("--image-path", required=True)
++    p.add_argument("--work", default="/tmp/turncast_test")
++    a = p.parse_args()
++    os.makedirs(a.work, exist_ok=True)
++    torch.set_num_threads(2)
++    parity(a)
++    budgets(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/turncast/train.py b/turncast/train.py
+new file mode 100644
+index 0000000..46bc811
+--- /dev/null
++++ b/turncast/train.py
+@@ -0,0 +1,359 @@
++"""
++Train the TurnCast-KV forecaster and check it offline against PyramidKV.
++
++Input: folders written by turncast/collect.py (one .pt file per conversation).
++Output: scorer.pt (load with --turncast-scorer) and report.json.
++
++Training: listwise distillation.  For every compression point and every
++(layer, head), the forecaster's softmax over the cached entries is fitted to the
++attention share the later turns actually paid (KL divergence).  Conversations
++are split 90/10 into fit / validation; the epoch with the lowest validation KL
++is kept.  Fixed settings (not tuned per run): AdamW, lr 2e-3, weight decay 1e-4,
++8 epochs, cosine schedule, 64 hidden units.
++
++Offline check (on --eval-dirs, e.g. the held-out conversations, or else on the
++validation split): at ratios 0.9 / 0.8 / 0.5 and the evaluator's budget rule,
++the share of the later turns' attention that the KEPT entries receive, for
++  pyramidkv          PyramidKV scores (last-8 window, maxpool 7) + its floored schedule
++  pyramidkv_exact    the same scores with an exact L*C budget
++  turn_attention     this turn's attention (question + answer), exact pyramid budget
++  turncast           the forecaster, exact pyramid budget
++  oracle             the true future attention (upper bound), exact pyramid budget
++All of these see a full (uncompressed) history, so they rank single compression
++steps; the end-to-end evaluators measure the compounding over turns.
++
++Usage:
++    python turncast/train.py --train-dirs turncast_data/convbench/train turncast_data/multiverse/train \
++        --eval-dirs turncast_data/convbench/heldout turncast_data/multiverse/heldout --out turncast_scorer.pt
++"""
++import argparse
++import glob
++import json
++import math
++import os
++import random
++import sys
++import time
++
++import torch
++import torch.nn.functional as F
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++
++from kv_cache_pyramidkv import PyramidKVCache  # noqa: E402
++from kv_cache_turncast import (  # noqa: E402
++    FEATURE_NAMES, WINDOW, TurnCastScorer, conversation_meta, global_consensus,
++    layer_features, load_scorer, pyramid_budgets, save_scorer,
++)
++
++
++def parse_args():
++    p = argparse.ArgumentParser()
++    p.add_argument("--train-dirs", nargs="+", default=[])
++    p.add_argument("--eval-dirs", nargs="*", default=[])
++    p.add_argument("--out", default="turncast_scorer.pt")
++    p.add_argument("--report", default=None, help="default: <out without .pt>_report.json")
++    p.add_argument("--eval-only", action="store_true", help="skip training; evaluate --out")
++    p.add_argument("--epochs", type=int, default=8)
++    p.add_argument("--lr", type=float, default=2e-3)
++    p.add_argument("--hidden", type=int, default=64)
++    p.add_argument("--groups-per-step", type=int, default=0,
++                   help="0 = all (layer, head) groups of a compression point per step")
++    p.add_argument("--feature-cache-gb", type=float, default=8.0)
++    p.add_argument("--ratios", default="0.9,0.8,0.5")
++    p.add_argument("--stages", default="prefill,turn",
++                   help="compression points to train on (prefill = Turn-1 compression, turn = boundaries)")
++    p.add_argument("--seed", type=int, default=0)
++    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    p.add_argument("--threads", type=int, default=0)
++    return p.parse_args()
++
++
++# ----------------------------------------------------------------------
++# Data
++# ----------------------------------------------------------------------
++def load_conversations(dirs):
++    convs = []
++    for d in dirs:
++        for path in sorted(glob.glob(os.path.join(d, "*.pt"))):
++            conv = torch.load(path, map_location="cpu")
++            conv["path"] = path
++            convs.append(conv)
++    return convs
++
++
++def sample_features(conv, sample, device):
++    """Per-layer [Hs, S_l, F] features, exactly as TurnCastKVCache computes them online."""
++    size = sample["size"]
++    meta = conversation_meta(conv["seg"][:size].long(), conv["turn"][:size].long(),
++                             sample["turn_now"], conv["image_start"], conv["image_len"], device)
++    layers = sample["layers"]
++    cons = [layer["cons"].float().to(device) for layer in layers]
++    present = [layer["present"].to(device) for layer in layers]
++    glob_values = global_consensus(cons, present)
++    feats = []
++    for index, layer in enumerate(layers):
++        snap = {name: layer[name].float().to(device) for name in ("q", "a", "w", "h")}
++        snap.update({name: layer[name].to(device) for name in ("q_has", "a_has", "h_has")})
++        snap["pos"] = layer["pos"].long().to(device)
++        feats.append(layer_features(snap, layer["logk"].float().to(device), layer["logv"].float().to(device),
++                                    cons[index], glob_values, meta))
++    return feats
++
++
++def sample_labels(sample, device):
++    out = []
++    for layer in sample["layers"]:
++        y = layer["label"].float().to(device)
++        out.append(y / y.sum(dim=-1, keepdim=True).clamp(min=1e-12))
++    return out
++
++
++def forward_layers(scorer, conv, feats, layer_ids):
++    """Logits for the selected layers: list of [Hs, S_l]."""
++    n_heads = conv["n_heads"]
++    flat, ids = [], []
++    for layer, f in zip(layer_ids, feats):
++        heads = conv["heads"][layer].long().to(f.device)
++        flat.append(f.reshape(-1, f.shape[-1]))
++        ids.append((layer * n_heads + heads).view(-1, 1).expand(f.shape[0], f.shape[1]).reshape(-1))
++    logits = scorer(torch.cat(flat), torch.cat(ids))
++    out, start = [], 0
++    for f in feats:
++        size = f.shape[0] * f.shape[1]
++        out.append(logits[start: start + size].view(f.shape[0], f.shape[1]))
++        start += size
++    return out
++
++
++def kl_loss(logits, labels):
++    """Mean over (layer, head) groups of KL(label || softmax(logits))."""
++    total, groups = 0.0, 0
++    for z, y in zip(logits, labels):
++        logp = torch.log_softmax(z.float(), dim=-1)
++        total = total + (torch.xlogy(y, y) - y * logp).sum(dim=-1).sum()
++        groups += y.shape[0]
++    return total / max(groups, 1)
++
++
++class FeatureCache:
++    def __init__(self, budget_gb, device):
++        self.budget = budget_gb * 1e9
++        self.used = 0
++        self.items = {}
++        self.device = device
++
++    def get(self, key, conv, sample):
++        if key in self.items:
++            return [f.float() for f in self.items[key]]
++        feats = sample_features(conv, sample, self.device)
++        size = sum(f.numel() for f in feats) * 2
++        if self.used + size <= self.budget:
++            self.items[key] = [f.half() for f in feats]
++            self.used += size
++        return feats
++
++
++# ----------------------------------------------------------------------
++# Training
++# ----------------------------------------------------------------------
++def fit_normalization(scorer, convs, device, limit=64):
++    rows = []
++    pairs = [(c, s) for c in convs for s in c["samples"]]
++    random.Random(0).shuffle(pairs)
++    for conv, sample in pairs[:limit]:
++        feats = torch.cat([f.reshape(-1, len(FEATURE_NAMES)) for f in sample_features(conv, sample, device)])
++        rows.append(feats[torch.randperm(feats.shape[0], device=device)[:20000]])
++    rows = torch.cat(rows)
++    scorer.feat_mean.copy_(rows.mean(0))
++    scorer.feat_std.copy_(rows.std(0).clamp(min=1e-3))
++
++
++def evaluate_kl(scorer, pairs, cache, device):
++    total, count = 0.0, 0
++    with torch.no_grad():
++        for key, conv, sample in pairs:
++            feats = cache.get(key, conv, sample)
++            logits = forward_layers(scorer, conv, feats, range(len(feats)))
++            total += float(kl_loss(logits, sample_labels(sample, device)))
++            count += 1
++    return total / max(count, 1)
++
++
++def train(args, convs, device):
++    rng = random.Random(args.seed)
++    order = list(range(len(convs)))
++    rng.shuffle(order)
++    n_val = max(1, len(order) // 10)
++    val_ids, fit_ids = set(order[:n_val]), order[n_val:]
++    fit_pairs = [((i, j), convs[i], s) for i in fit_ids for j, s in enumerate(convs[i]["samples"])]
++    val_pairs = [((i, j), convs[i], s) for i in sorted(val_ids) for j, s in enumerate(convs[i]["samples"])]
++    n_layers, n_heads = convs[0]["n_layers"], convs[0]["n_heads"]
++    torch.manual_seed(args.seed)
++    scorer = TurnCastScorer(n_layers, n_heads, hidden=args.hidden).to(device)
++    fit_normalization(scorer, [convs[i] for i in fit_ids], device)
++    opt = torch.optim.AdamW(scorer.parameters(), lr=args.lr, weight_decay=1e-4)
++    total_steps = args.epochs * len(fit_pairs)
++    sched = torch.optim.lr_scheduler.LambdaLR(
++        opt, lambda step: 0.5 * (1 + math.cos(math.pi * min(step, total_steps) / max(total_steps, 1))))
++    cache = FeatureCache(args.feature_cache_gb, device)
++    best, best_state, history = float("inf"), None, []
++    print(f"fit on {len(fit_pairs)} compression points ({len(fit_ids)} conversations), "
++          f"validate on {len(val_pairs)} ({len(val_ids)} conversations); "
++          f"{sum(p.numel() for p in scorer.parameters())} parameters", flush=True)
++    for epoch in range(args.epochs):
++        started = time.time()
++        rng.shuffle(fit_pairs)
++        scorer.train()
++        running = 0.0
++        for key, conv, sample in fit_pairs:
++            feats = cache.get(key, conv, sample)
++            labels = sample_labels(sample, device)
++            layer_ids = list(range(len(feats)))
++            if args.groups_per_step:
++                heads = feats[0].shape[0]
++                layer_ids = sorted(rng.sample(layer_ids, max(1, min(len(layer_ids), args.groups_per_step // heads))))
++                feats, labels = [feats[i] for i in layer_ids], [labels[i] for i in layer_ids]
++            loss = kl_loss(forward_layers(scorer, conv, feats, layer_ids), labels)
++            opt.zero_grad()
++            loss.backward()
++            opt.step()
++            sched.step()
++            running += float(loss)
++        scorer.eval()
++        val = evaluate_kl(scorer, val_pairs, cache, device)
++        history.append({"epoch": epoch + 1, "train_kl": running / len(fit_pairs), "val_kl": val})
++        print(f"epoch {epoch + 1}: train KL {running / len(fit_pairs):.4f}  val KL {val:.4f}  "
++              f"({time.time() - started:.0f}s)", flush=True)
++        if val < best:
++            best = val
++            best_state = {k: v.detach().clone() for k, v in scorer.state_dict().items()}
++    scorer.load_state_dict(best_state)
++    scorer.eval()
++    return scorer, [convs[i] for i in sorted(val_ids)], history
++
++
++# ----------------------------------------------------------------------
++# Offline check
++# ----------------------------------------------------------------------
++def floored_pyramid(n_layers, ratio, n_logical, lengths):
++    """PyramidKV's own (floored) schedule: past entries per layer + window."""
++    capacity = max(1, int(n_logical * (1.0 - ratio)))
++    window = max(1, min(WINDOW, capacity - 1)) if capacity > 1 else 1
++    schedule = PyramidKVCache(layer_num=n_layers, ratio=ratio, window_size=WINDOW, exact_budget=False)
++    caps = schedule.pyramid_capacities(capacity, window, max(lengths))
++    return caps, window
++
++
++def topk_keep(scores, budget, pos):
++    scores = scores.clone()
++    scores[pos == 0] = float("inf")
++    return scores.topk(budget, dim=-1).indices
++
++
++def offline_eval(scorer, convs, ratios, device):
++    methods = ["pyramidkv", "pyramidkv_exact", "turn_attention", "turncast", "oracle"]
++    totals = {r: {m: {"prefill": [], "turn": []} for m in methods} for r in ratios}
++    memory = {r: {m: [0, 0] for m in methods} for r in ratios}
++    with torch.no_grad():
++        for conv in convs:
++            for sample in conv["samples"]:
++                size, stage = sample["size"], sample["stage"]
++                layers = sample["layers"]
++                n_layers = len(layers)
++                labels = sample_labels(sample, device)
++                feats = sample_features(conv, sample, device)
++                logits = forward_layers(scorer, conv, feats, range(n_layers))
++                lengths = [y.shape[1] for y in labels]
++                for ratio in ratios:
++                    exact = pyramid_budgets(n_layers, ratio, size, lengths)
++                    if exact is None:
++                        continue
++                    floored, window = floored_pyramid(n_layers, ratio, size, lengths)
++                    for layer in range(n_layers):
++                        y, length = labels[layer], lengths[layer]
++                        pos = layers[layer]["pos"].long().to(device)
++                        w = layers[layer]["w"].float().to(device)
++                        past = length - window
++                        for name, caps in (("pyramidkv", floored), ("pyramidkv_exact", [b - window for b in exact])):
++                            pooled = F.max_pool1d(w[:, :past].unsqueeze(1), 7, 1, 3).squeeze(1)
++                            keep = torch.cat([pooled.topk(max(0, min(caps[layer], past)), dim=-1).indices,
++                                              torch.arange(past, length, device=device).expand(y.shape[0], -1)], -1)
++                            totals[ratio][name][stage].append(y.gather(1, keep).sum(-1))
++                            memory[ratio][name][0] += keep.shape[1]
++                            memory[ratio][name][1] += length
++                        turn_score = torch.logaddexp(layers[layer]["q"].float(), layers[layer]["a"].float()).to(device)
++                        for name, scores, budget in (
++                            ("turn_attention", turn_score, exact[layer]),
++                            ("turncast", logits[layer], exact[layer]),
++                            ("oracle", y, exact[layer]),
++                        ):
++                            keep = topk_keep(scores, min(budget, length), pos)
++                            totals[ratio][name][stage].append(y.gather(1, keep).sum(-1))
++                            memory[ratio][name][0] += keep.shape[1]
++                            memory[ratio][name][1] += length
++    report = {}
++    for ratio in ratios:
++        report[str(ratio)] = {}
++        for name in methods:
++            row = {}
++            for stage in ("prefill", "turn"):
++                vals = totals[ratio][name][stage]
++                row[stage] = float(torch.cat(vals).mean()) if vals else float("nan")
++            both = totals[ratio][name]["prefill"] + totals[ratio][name]["turn"]
++            row["all"] = float(torch.cat(both).mean()) if both else float("nan")
++            kept, total = memory[ratio][name]
++            row["kept_fraction"] = kept / max(1, total)
++            report[str(ratio)][name] = row
++    return report
++
++
++def print_report(title, report):
++    print(f"\n{title}: share of later turns' attention kept (higher is better)")
++    for ratio, rows in report.items():
++        print(f"  ratio {ratio}")
++        print(f"    {'method':<16} {'prefill':>8} {'turn':>8} {'all':>8} {'kept':>8}")
++        for name, row in rows.items():
++            print(f"    {name:<16} {row['prefill']:8.4f} {row['turn']:8.4f} {row['all']:8.4f} "
++                  f"{row['kept_fraction']:8.4f}")
++
++
++def main():
++    args = parse_args()
++    if args.threads:
++        torch.set_num_threads(args.threads)
++    device = torch.device(args.device)
++    ratios = [float(r) for r in args.ratios.split(",")]
++    report = {"args": vars(args)}
++    if args.eval_only:
++        scorer = load_scorer(args.out, device)
++        val_convs = []
++    else:
++        convs = load_conversations(args.train_dirs)
++        stages = set(args.stages.split(","))
++        for conv in convs:
++            conv["samples"] = [s for s in conv["samples"] if s["stage"] in stages]
++        convs = [c for c in convs if c["samples"]]
++        if not convs:
++            raise SystemExit("no training conversations found")
++        scorer, val_convs, history = train(args, convs, device)
++        save_scorer(scorer, args.out, extra={"history": history, "train_dirs": args.train_dirs,
++                                             "conversations": len(convs)})
++        report["history"] = history
++        print(f"saved {args.out}")
++        report["validation"] = offline_eval(scorer, val_convs, ratios, device)
++        print_report("validation split", report["validation"])
++    if args.eval_dirs:
++        for d in args.eval_dirs:
++            convs = load_conversations([d])
++            if convs:
++                report[d] = offline_eval(scorer, convs, ratios, device)
++                print_report(f"{d} ({len(convs)} conversations)", report[d])
++    path = args.report or os.path.splitext(args.out)[0] + "_report.json"
++    json.dump(report, open(path, "w"), indent=2)
++    print(f"report -> {path}")
++
++
++if __name__ == "__main__":
++    main()

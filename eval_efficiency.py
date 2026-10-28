@@ -130,6 +130,7 @@ ALL_METHODS = [
     "meda",
     "pyramidkv",
     "turn_conditioned_coverage",
+    "turncast_kv"
 ]
 # These policies never read attention maps, so by default they do not pay for
 # materialising them (use --output-attentions always to match the ROUGE run).
@@ -218,6 +219,13 @@ def build_parser():
     sweep.add_argument("--num-samples", type=int, default=1, help="Measured conversations per config.")
     sweep.add_argument("--sample-offset", type=int, default=0)
     sweep.add_argument("--warmup", type=int, default=1, help="Unmeasured conversations per config.")
+
+
+        # TurnCast-KV (kv_cache_turncast.py): a trained forecaster (turncast/train.py).
+    sweep.add_argument("--turncast-scorer", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/turncast_data/turncast_scorer.pt",
+                        help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
+    sweep.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
+                        help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
 
     longctx = parser.add_argument_group("long-context samples (make_long_context.py)")
     longctx.add_argument(
@@ -872,6 +880,8 @@ class Benchmark:
             coverage_no_mass=getattr(args, "coverage_no_mass", False),
             coverage_mass_min_sim=getattr(args, "coverage_mass_min_sim", 0.25),
             coverage_alpha_auto=getattr(args, "coverage_alpha_auto", False),
+            turncast_scorer=getattr(args, "turncast_scorer", None),
+            turncast_boundary=getattr(args, "turncast_boundary", "window"),
 
 
         )
@@ -1024,6 +1034,11 @@ class Benchmark:
                     # Add this block to attach the model for mass-preserving caches
                     if hasattr(state.kv_cache, "attach_model"):
                         state.kv_cache.attach_model(self.model)
+                    if hasattr(state.kv_cache, "register_question"):
+                        state.kv_cache.register_question(questions[0])
+
+
+
                 sink = None
                 if config["prefill_attention"] == "per_layer":
                     sink = getattr(state.kv_cache, "observe_layer", None)
@@ -1131,10 +1146,13 @@ class Benchmark:
                     else:
                         t_turn_start = time.perf_counter()
                         _, user_ids = self.turn_segment_ids(question)
+                        if hasattr(state.kv_cache, "register_question"):
+                            state.kv_cache.register_question(question)
                         user_tokens = len(user_ids)
                         input_tokens += user_tokens
                         self.feed(state, user_ids, decode_attentions, tracker)
-
+                    if hasattr(state.kv_cache, "begin_answer"):
+                        state.kv_cache.begin_answer()
                     limit = args.gen_tokens
                     if args.stop_at_eos and self.model_context_length:
                         limit = max(1, min(limit, self.model_context_length - state.logical_len - 8))
