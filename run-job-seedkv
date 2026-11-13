@@ -1,0 +1,80 @@
+#!/bin/bash
+
+#SBATCH --time=24:00:00   # walltime limit (HH:MM:SS)
+#SBATCH --nodes=1   # number of nodes
+#SBATCH --ntasks-per-node=1
+#SBATCH --mem=100G   # maximum memory per node
+#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=nova
+#SBATCH --job-name="seedkv"
+#SBATCH --error="%j-error"
+#SBATCH --output="seedkv-%j.out"
+
+# SeedKV against PyramidKV and TurnCast-KV on ConvBench and MultiVerse.
+#
+#   sbatch run-job-seedkv                                    # everything, ratios 0.9 0.8 0.5
+#   sbatch --export=ALL,RATIOS="0.95",STAGES="ppl" run-job-seedkv
+#   sbatch --export=ALL,METHODS="seedkv",SEEDKV_ARGS="--seedkv-no-regenerate",TAG="-retain",STAGES="ppl rouge" run-job-seedkv
+#
+# STAGES: any of  ppl rouge efficiency
+# METHODS: any --method name; SeedKV needs no trained file.
+
+source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
+
+ROOT=/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache
+MODEL=${MODEL:-/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b}
+RATIOS=${RATIOS:-"0.9 0.8 0.5"}
+METHODS=${METHODS:-"pyramidkv turncast_kv seedkv"}
+STAGES=${STAGES:-"ppl rouge efficiency"}
+SAMPLES_ARG=${SAMPLES:+--eval-samples $SAMPLES}     # default: all conversations
+MAXTOK=${MAXTOK:-512}
+# Extra flags for SeedKV only, e.g. "--seedkv-allocation pyramidkv" (same entries
+# per layer as PyramidKVCache) or "--seedkv-no-regenerate" (the ablation).
+SEEDKV_ARGS=${SEEDKV_ARGS:-}
+TAG=${TAG:-}
+
+declare -A DATA IMAGES
+DATA[Convbench]=$ROOT/ConvBench/convbench.json
+IMAGES[Convbench]=$ROOT/ConvBench/visit_bench_images
+DATA[MultiVerse]=$ROOT/MultiVerse_for_ppl/multiverse_ppl_full.json
+IMAGES[MultiVerse]=$ROOT/MultiVerse_raw/images
+
+for DATASET in Convbench MultiVerse; do
+  for RATIO in $RATIOS; do
+    for METHOD in $METHODS; do
+      NAME=${DATASET}-${RATIO}-${METHOD}
+      EXTRA=""
+      if [[ "$METHOD" == "seedkv" ]]; then
+        EXTRA="$SEEDKV_ARGS"
+        NAME=${NAME}${TAG}
+      fi
+
+      if [[ " $STAGES " == *" ppl "* ]]; then
+        python eval_ppl_final.py \
+          --model-path $MODEL \
+          --data-path ${DATA[$DATASET]} --image-path ${IMAGES[$DATASET]} \
+          $SAMPLES_ARG \
+          --method $METHOD --ratio $RATIO $EXTRA \
+          --output-dir logs_ppl_llava/seedkv --exp-name $NAME
+      fi
+
+      if [[ " $STAGES " == *" rouge "* ]]; then
+        python eval_rouge_final2.py \
+          --model-path $MODEL \
+          --data-path ${DATA[$DATASET]} --image-path ${IMAGES[$DATASET]} \
+          $SAMPLES_ARG --max-token-generated $MAXTOK \
+          --method $METHOD --ratio $RATIO $EXTRA \
+          --output-dir logs_rouge_llava/seedkv/$NAME
+      fi
+    done
+  done
+done
+
+# Latency, throughput and memory.  SeedKV's regeneration is inside TTFT of
+# turns 2+, and the question-reading peak shows up as kv_transient/kv_peak.
+if [[ " $STAGES " == *" efficiency "* ]]; then
+  python eval_efficiency.py \
+    --methods full $METHODS \
+    --ratios $RATIOS \
+    --context-lengths native --gen-tokens 64 --num-turns 3
+fi

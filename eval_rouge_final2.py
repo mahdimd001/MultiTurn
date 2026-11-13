@@ -70,6 +70,8 @@ from kv_cache_coverage import TurnConditionedCoverageKVCache
 from kv_cache_atlaskv import AtlasKVCache
 from kv_cache_coverage2 import TurnConditionedCoverage2KVCache
 from kv_cache_turncast import TurnCastKVCache
+from kv_cache_seedkv import SeedKVCache
+from kv_cache_ghostkv import GhostKVCache
 from tgv_kv_legacy_nova import (
     enable_online_attention,
     online_attention,
@@ -304,6 +306,49 @@ def build_cache(
     if args.method == "elastic_cache":
         return ElasticCache(layer_num=layer_num, **baseline_common)
     
+    if args.method == "ghostkv":
+        # Demand paging of image patches from a seed (kv_cache_ghostkv.py).
+        return GhostKVCache(
+            layer_num=layer_num,
+            ratio=args.ratio,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            window_size=getattr(args, "seedkv_window_size", 8),
+            allocation=getattr(args, "seedkv_allocation", "pyramid"),
+            seed=getattr(args, "seedkv_seed", "auto"),
+            charge=not getattr(args, "seedkv_no_seed_charge", False),
+            locators=getattr(args, "ghostkv_locators", None),
+            n_locators=getattr(args, "ghostkv_n_locators", 4),
+            ghost_share=getattr(args, "ghostkv_ghost_share", 0.02),
+            save_maps=getattr(args, "ghostkv_save_maps", None),
+            threshold=getattr(args, "ghostkv_threshold", "auto"),
+            page_slots=getattr(args, "ghostkv_page_slots", None),
+            page_frac=getattr(args, "ghostkv_page_frac", 0.3),
+            cover=getattr(args, "ghostkv_cover", 0.9),
+            demand_decay=getattr(args, "ghostkv_demand_decay", 0.9),
+            image_weight=getattr(args, "ghostkv_image_weight", 1.0),
+            fault_on=getattr(args, "ghostkv_fault_on", "all"),
+            max_faults=getattr(args, "ghostkv_max_faults", 0),
+            context=getattr(args, "ghostkv_context", "prefix+resident"),
+            paging=not getattr(args, "ghostkv_no_paging", False),
+            calibrate=getattr(args, "ghostkv_calibrate", None),
+        )
+
+    if args.method == "seedkv":
+        # Evict the image to a seed, regenerate it for every turn (kv_cache_seedkv.py).
+        return SeedKVCache(
+            layer_num=layer_num,
+            ratio=args.ratio,
+            image_start=image_start,
+            image_token_len=image_token_len,
+            window_size=getattr(args, "seedkv_window_size", 8),
+            allocation=getattr(args, "seedkv_allocation", "pyramid"),
+            seed=getattr(args, "seedkv_seed", "auto"),
+            charge_seed=not getattr(args, "seedkv_no_seed_charge", False),
+            refresh_every=getattr(args, "seedkv_refresh_every", 0),
+            regenerate=not getattr(args, "seedkv_no_regenerate", False),
+        )
+
     if args.method == "turncast_kv":
         # Learned forecast of next-turn attention (kv_cache_turncast.py).
         return TurnCastKVCache(
@@ -1032,6 +1077,14 @@ def main(args):
                         "were added to the conversation."
                     )
 
+                # SeedKV regenerates the prefill KV here, so the whole image is
+                # visible while the new question is read.
+                if hasattr(kv_cache, "prepare_turn"):
+                    with torch.no_grad():
+                        past_key_values = kv_cache.prepare_turn(
+                            past_key_values, num_of_token
+                        )
+
                 # Send ONLY Q2/Q3/... plus template formatting.  No image and no
                 # previous question/answer are resent.
                 with torch.no_grad():
@@ -1344,7 +1397,7 @@ if __name__ == "__main__":
     # LLaVA/model arguments retained from the original evaluator.
     parser.add_argument("--model-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_for_ppl/multiverse_ppl.json")
+    parser.add_argument("--data-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_for_ppl/multiverse_ppl_full.json")
     parser.add_argument("--image-path", type=str, default="/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/MultiVerse_raw/images")
     parser.add_argument("--device", type=str, default="cuda", help="Nova: cuda (default) or cuda:N")
     parser.add_argument("--conv-mode", type=str, default=None)
@@ -1366,10 +1419,10 @@ if __name__ == "__main__":
         "--max_token_generated",
         "--max-new-tokens",
         type=parse_generated_token_limit,
-        default=512,
+        default=128,
         metavar="FREE|N|Nk",
         help=(
-            "Maximum generated tokens for each turn (default 512). Pass 'free' "
+            "Maximum generated tokens for each turn (default 128). Pass 'free' "
             "to generate until EOS/separator or remaining model-context capacity."
         ),
     )
@@ -1377,7 +1430,7 @@ if __name__ == "__main__":
     # Cache/evaluation arguments retained from the original evaluator.
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--recent-size", type=int, default=2047)
-    parser.add_argument("--eval-samples", type=int, default=None)
+    parser.add_argument("--eval-samples", type=int, default=10)
     parser.add_argument(
         "--exp-name",
         type=str,
@@ -1404,6 +1457,8 @@ if __name__ == "__main__":
             "pyramidkv",
             "atlaskv",
             "turncast_kv",
+            "seedkv",
+            "ghostkv",
         ],
     )
 
@@ -1413,6 +1468,56 @@ if __name__ == "__main__":
                         help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
     parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
                         help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+
+    # SeedKV (kv_cache_seedkv.py): regenerate the image KV at every turn.
+    parser.add_argument("--seedkv-window-size", type=int, default=8,
+                        help="SeedKV: observation window (same meaning as PyramidKV's).")
+    parser.add_argument("--seedkv-allocation", choices=["pyramid", "pyramidkv", "uniform"], default="pyramid",
+                        help="SeedKV: per-layer budgets. pyramid = PyramidKV's schedule with an exact total; "
+                             "pyramidkv = the same entries per layer as this repo's PyramidKVCache; uniform = equal.")
+    parser.add_argument("--seedkv-seed", choices=["auto", "features", "embeds"], default="auto",
+                        help="SeedKV: what is stored to regenerate the prefill (auto = smallest that works).")
+    parser.add_argument("--seedkv-no-seed-charge", action="store_true",
+                        help="SeedKV ablation: do not subtract the seed's size from the KV budget.")
+    parser.add_argument("--seedkv-refresh-every", type=int, default=0,
+                        help="SeedKV: also regenerate and reselect every N answer tokens (0 = once per turn).")
+    parser.add_argument("--seedkv-no-regenerate", action="store_true",
+                        help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
+
+    # GhostKV (kv_cache_ghostkv.py): regenerate only the image patches a step needs and lacks.
+    parser.add_argument("--ghostkv-locators", type=str, default=None,
+                        help="GhostKV: calibration file with the locator heads (made by --ghostkv-calibrate).")
+    parser.add_argument("--ghostkv-calibrate", type=str, default=None,
+                        help="GhostKV: run with the full cache and write the locator-head scores to this file.")
+    parser.add_argument("--ghostkv-n-locators", type=int, default=4,
+                        help="GhostKV: number of locator heads whose image keys are kept.")
+    parser.add_argument("--ghostkv-ghost-share", type=float, default=0.02,
+                        help="GhostKV: the ghost keys may use this share of the KV budget (always at least one head).")
+    parser.add_argument("--ghostkv-save-maps", default=None,
+                        help="GhostKV: write the relevance map of every turn to this file (see seedkv/show_relevance.py).")
+    parser.add_argument("--ghostkv-threshold", default="auto",
+                        help="GhostKV: page in when a locator head puts this much attention on missing patches "
+                             "(auto: half of the head's 90th-percentile level from the calibration file).")
+    parser.add_argument("--ghostkv-page-slots", type=int, default=None,
+                        help="GhostKV: entries per layer reserved for paged-in patches (default 30%% of the budget).")
+    parser.add_argument("--ghostkv-page-frac", type=float, default=0.3,
+                        help="GhostKV: protected paged patches as a share of the per-layer budget (if no --ghostkv-page-slots).")
+    parser.add_argument("--ghostkv-demand-decay", type=float, default=0.9,
+                        help="GhostKV: per-token decay of a patch's demand; lower lets new requests displace paged patches sooner.")
+    parser.add_argument("--ghostkv-image-weight", type=float, default=1.0,
+                        help="GhostKV: weight of image entries when the cache is compressed (< 1 keeps more text; "
+                             "the image can be paged back, text cannot).")
+    parser.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"],
+                        help="GhostKV: page in while reading the question and answering (all) or only while answering.")
+    parser.add_argument("--ghostkv-max-faults", type=int, default=0,
+                        help="GhostKV: at most this many regenerations per turn (0 = no limit).")
+    parser.add_argument("--ghostkv-cover", type=float, default=0.9,
+                        help="GhostKV: a fault pages the top missing patches that hold this share of the missing attention.")
+    parser.add_argument("--ghostkv-context", default="prefix+resident",
+                        choices=["prefix+resident", "prefix", "resident", "none"],
+                        help="GhostKV: what a regenerated patch can attend to.")
+    parser.add_argument("--ghostkv-no-paging", action="store_true",
+                        help="GhostKV ablation: same retention rule, no ghost keys and no regeneration.")
 
 
     parser.add_argument(

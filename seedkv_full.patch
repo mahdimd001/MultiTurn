@@ -1,0 +1,4311 @@
+diff --git a/eval_efficiency.py b/eval_efficiency.py
+index c1d22fa..91c06fd 100644
+--- a/eval_efficiency.py
++++ b/eval_efficiency.py
+@@ -130,7 +130,8 @@ ALL_METHODS = [
+     "meda",
+     "pyramidkv",
+     "turn_conditioned_coverage",
+-    "turncast_kv"
++    "turncast_kv",
++    "seedkv",
+ ]
+ # These policies never read attention maps, so by default they do not pay for
+ # materialising them (use --output-attentions always to match the ROUGE run).
+@@ -1148,6 +1149,12 @@ class Benchmark:
+                         _, user_ids = self.turn_segment_ids(question)
+                         if hasattr(state.kv_cache, "register_question"):
+                             state.kv_cache.register_question(question)
++                        # SeedKV regenerates the prefill KV here (timed as part of TTFT).
++                        if hasattr(state.kv_cache, "prepare_turn"):
++                            with torch.no_grad():
++                                state.past_key_values = state.kv_cache.prepare_turn(
++                                    state.past_key_values, state.logical_len
++                                )
+                         user_tokens = len(user_ids)
+                         input_tokens += user_tokens
+                         self.feed(state, user_ids, decode_attentions, tracker)
+diff --git a/eval_ppl_final.py b/eval_ppl_final.py
+index 00d8fa0..0cc5d60 100644
+--- a/eval_ppl_final.py
++++ b/eval_ppl_final.py
+@@ -53,6 +53,7 @@ from kv_cache_final import (
+ from kv_cache_coverage import TurnConditionedCoverageKVCache
+ from kv_cache_atlaskv import AtlasKVCache
+ from kv_cache_turncast import TurnCastKVCache
++from kv_cache_seedkv import SeedKVCache
+ from tgv_kv_legacy_nova import (
+     enable_online_attention,
+     online_attention,
+@@ -237,6 +238,21 @@ def build_cache(
+     if args.method == "elastic_cache":
+         return ElasticCache(layer_num=layer_num, **baseline_common)
+ 
++    if args.method == "seedkv":
++        # Evict the image to a seed, regenerate it for every turn (kv_cache_seedkv.py).
++        return SeedKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            image_start=image_start,
++            image_token_len=image_token_len,
++            window_size=getattr(args, "seedkv_window_size", 8),
++            allocation=getattr(args, "seedkv_allocation", "pyramid"),
++            seed=getattr(args, "seedkv_seed", "auto"),
++            charge_seed=not getattr(args, "seedkv_no_seed_charge", False),
++            refresh_every=getattr(args, "seedkv_refresh_every", 0),
++            regenerate=not getattr(args, "seedkv_no_regenerate", False),
++        )
++
+     if args.method == "turncast_kv":
+         # Learned forecast of next-turn attention (kv_cache_turncast.py).
+         return TurnCastKVCache(
+@@ -787,6 +803,14 @@ def main(args):
+                         "were added to the conversation."
+                     )
+ 
++                # SeedKV regenerates the prefill KV here, so the whole image is
++                # visible while the new question is read.
++                if hasattr(kv_cache, "prepare_turn"):
++                    with torch.no_grad():
++                        past_key_values = kv_cache.prepare_turn(
++                            past_key_values, num_of_token
++                        )
++
+                 # Send ONLY Q2/Q3/... plus template formatting.  No image and no
+                 # previous question/answer are resent.
+                 with torch.no_grad():
+@@ -1049,6 +1073,7 @@ if __name__ == "__main__":
+             "pyramidkv",
+             "atlaskv",
+             "turncast_kv",
++            "seedkv",
+         ],
+     )
+ 
+@@ -1059,6 +1084,21 @@ if __name__ == "__main__":
+     parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
+                         help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+ 
++    # SeedKV (kv_cache_seedkv.py): regenerate the image KV at every turn.
++    parser.add_argument("--seedkv-window-size", type=int, default=8,
++                        help="SeedKV: observation window (same meaning as PyramidKV's).")
++    parser.add_argument("--seedkv-allocation", choices=["pyramid", "pyramidkv", "uniform"], default="pyramid",
++                        help="SeedKV: per-layer budgets. pyramid = PyramidKV's schedule with an exact total; "
++                             "pyramidkv = the same entries per layer as this repo's PyramidKVCache; uniform = equal.")
++    parser.add_argument("--seedkv-seed", choices=["auto", "features", "embeds"], default="auto",
++                        help="SeedKV: what is stored to regenerate the prefill (auto = smallest that works).")
++    parser.add_argument("--seedkv-no-seed-charge", action="store_true",
++                        help="SeedKV ablation: do not subtract the seed's size from the KV budget.")
++    parser.add_argument("--seedkv-refresh-every", type=int, default=0,
++                        help="SeedKV: also regenerate and reselect every N answer tokens (0 = once per turn).")
++    parser.add_argument("--seedkv-no-regenerate", action="store_true",
++                        help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
++
+ 
+ 
+     parser.add_argument("--ratio", type=float, default=0.9)
+diff --git a/eval_rouge_final2.py b/eval_rouge_final2.py
+index a4d8f4b..fe8c9f5 100644
+--- a/eval_rouge_final2.py
++++ b/eval_rouge_final2.py
+@@ -70,6 +70,7 @@ from kv_cache_coverage import TurnConditionedCoverageKVCache
+ from kv_cache_atlaskv import AtlasKVCache
+ from kv_cache_coverage2 import TurnConditionedCoverage2KVCache
+ from kv_cache_turncast import TurnCastKVCache
++from kv_cache_seedkv import SeedKVCache
+ from tgv_kv_legacy_nova import (
+     enable_online_attention,
+     online_attention,
+@@ -304,6 +305,21 @@ def build_cache(
+     if args.method == "elastic_cache":
+         return ElasticCache(layer_num=layer_num, **baseline_common)
+     
++    if args.method == "seedkv":
++        # Evict the image to a seed, regenerate it for every turn (kv_cache_seedkv.py).
++        return SeedKVCache(
++            layer_num=layer_num,
++            ratio=args.ratio,
++            image_start=image_start,
++            image_token_len=image_token_len,
++            window_size=getattr(args, "seedkv_window_size", 8),
++            allocation=getattr(args, "seedkv_allocation", "pyramid"),
++            seed=getattr(args, "seedkv_seed", "auto"),
++            charge_seed=not getattr(args, "seedkv_no_seed_charge", False),
++            refresh_every=getattr(args, "seedkv_refresh_every", 0),
++            regenerate=not getattr(args, "seedkv_no_regenerate", False),
++        )
++
+     if args.method == "turncast_kv":
+         # Learned forecast of next-turn attention (kv_cache_turncast.py).
+         return TurnCastKVCache(
+@@ -1032,6 +1048,14 @@ def main(args):
+                         "were added to the conversation."
+                     )
+ 
++                # SeedKV regenerates the prefill KV here, so the whole image is
++                # visible while the new question is read.
++                if hasattr(kv_cache, "prepare_turn"):
++                    with torch.no_grad():
++                        past_key_values = kv_cache.prepare_turn(
++                            past_key_values, num_of_token
++                        )
++
+                 # Send ONLY Q2/Q3/... plus template formatting.  No image and no
+                 # previous question/answer are resent.
+                 with torch.no_grad():
+@@ -1404,6 +1428,7 @@ if __name__ == "__main__":
+             "pyramidkv",
+             "atlaskv",
+             "turncast_kv",
++            "seedkv",
+         ],
+     )
+ 
+@@ -1414,6 +1439,21 @@ if __name__ == "__main__":
+     parser.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
+                         help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+ 
++    # SeedKV (kv_cache_seedkv.py): regenerate the image KV at every turn.
++    parser.add_argument("--seedkv-window-size", type=int, default=8,
++                        help="SeedKV: observation window (same meaning as PyramidKV's).")
++    parser.add_argument("--seedkv-allocation", choices=["pyramid", "pyramidkv", "uniform"], default="pyramid",
++                        help="SeedKV: per-layer budgets. pyramid = PyramidKV's schedule with an exact total; "
++                             "pyramidkv = the same entries per layer as this repo's PyramidKVCache; uniform = equal.")
++    parser.add_argument("--seedkv-seed", choices=["auto", "features", "embeds"], default="auto",
++                        help="SeedKV: what is stored to regenerate the prefill (auto = smallest that works).")
++    parser.add_argument("--seedkv-no-seed-charge", action="store_true",
++                        help="SeedKV ablation: do not subtract the seed's size from the KV budget.")
++    parser.add_argument("--seedkv-refresh-every", type=int, default=0,
++                        help="SeedKV: also regenerate and reselect every N answer tokens (0 = once per turn).")
++    parser.add_argument("--seedkv-no-regenerate", action="store_true",
++                        help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
++
+ 
+     parser.add_argument(
+         "--ratio",
+diff --git a/kv_cache_seedkv.py b/kv_cache_seedkv.py
+new file mode 100644
+index 0000000..41c3ab1
+--- /dev/null
++++ b/kv_cache_seedkv.py
+@@ -0,0 +1,717 @@
++"""
++SeedKV: evict the image to a seed, regrow it when the next question arrives.
++
++Problem
++-------
++Every cache policy in this repo is retain-only.  It decides which visual
++entries survive right after the Turn-1 prefill and at each turn boundary,
++always BEFORE the next question exists, and an evicted entry can never come
++back.  Later turns therefore read whatever an earlier question happened to
++keep.
++
++Observation
++-----------
++In a multimodal conversation the prefill prompt ("<system> USER: Q1 <image>
++ASSISTANT:") sits at the very start of the context, so its KV entries depend
++on nothing that comes later.  They can be regenerated EXACTLY, at any turn,
++by running the frozen LLM once over the prompt's input embeddings.  What is
++needed to rebuild those embeddings (the "seed") is tiny next to the cache:
++for LLaVA-1.5-7B the 576 CLIP features and the prompt's token ids are about
++1.2 MB in 16-bit floats, against about 300 MB for the image KV over 32 layers.
++
++Method
++------
++  1. Turn-1 prefill.  Keep the seed (vision features + prompt token ids).
++     Compress the prefill to the budget with the question in view.
++  2. Turn boundary (``finalize_turn``).  Drop EVERY prefill entry.  The whole
++     budget goes to dialogue text, which cannot be regenerated cheaply.
++  3. Next turn (``prepare_turn``).  Regenerate the full prefill KV from the
++     seed, with one batched forward of the prefill length.
++  4. Commit (first call after ``begin_answer``).  The new question has now
++     been read with the whole image visible.  Select image and text entries
++     together from its attention, down to the same number of entries a
++     boundary-only method holds at that moment.
++
++So the image is never irreversibly evicted, every turn selects visual entries
++with its own question, and selection errors do not carry over to later turns.
++
++Budget
++------
++C(n) = int(n * (1 - ratio)) entries per layer on average, like every other
++method here, MINUS the seed's own size (in KV entries), so that KV + seed
++never exceeds L * C:
++
++  * after the Turn-1 prefill   : L * C(prefill length)
++  * at rest between turns      : at most L * C(logical length), text only
++  * after the commit of a turn : L * (C(length at last boundary) + tokens
++                                 appended since), i.e. what PyramidKV holds
++
++Per-layer budgets follow PyramidKV's linear pyramid with an exact total.
++``allocation="pyramidkv"`` reproduces this repo's PyramidKVCache schedule
++instead (it rounds the slope down and so holds more than L * C);
++``allocation="uniform"`` gives every layer the same budget.  Inside a layer
++every KV head keeps its own entries; all heads keep the same NUMBER of image
++and text entries, so the tensors stay rectangular.
++
++The one moment above budget is the question of a later turn: the full prefill
++KV is resident while the question tokens are read (the same size as the
++Turn-1 prefill that every method holds before its first compression).
++
++Cost
++----
++One extra forward over the prefill (about TTFT of Turn 1) per later turn.
++No training, no extra generated tokens, no change to the attention function.
++Scoring is PyramidKV's rule (attention of the last ``window_size`` queries,
++1-D max-pool); what is new is where and when it is applied.
++
++Interface (eval_ppl_final.py / eval_rouge_final2.py / eval_efficiency.py)
++------------------------------------------------------------------------
++    cache = SeedKVCache(layer_num, ratio, image_start=..., image_token_len=...)
++    cache.attach_model(model)                      # before the prefill forward
++    past = cache(past, num_of_token, attentions)   # after every forward
++    cache.begin_answer()                           # once per turn, before the answer
++    past = cache.finalize_turn(past)               # at every turn boundary
++    past = cache.prepare_turn(past, num_of_token)  # before a later turn's tokens
++
++``prepare_turn`` is optional: without it the cache regenerates the prefill
++inside the first ``__call__`` of the turn, so that one token is computed
++without the image.  ``begin_answer`` tells the cache that the question has
++been read; a harness that cannot call it should set ``max_hydrated_tokens``
++so the commit happens after that many tokens instead.
++"""
++
++import math
++import time
++import warnings
++
++import torch
++import torch.nn.functional as F
++
++_WARNED = set()
++
++
++def _warn_once(key, message):
++    if key not in _WARNED:
++        _WARNED.add(key)
++        warnings.warn(message, stacklevel=3)
++
++
++# ----------------------------------------------------------------------
++# Per-layer budgets
++# ----------------------------------------------------------------------
++def layer_budgets(n_layers, total, window, lengths, allocation="pyramid", beta=20.0):
++    """Entries kept per layer (window included) for ``total`` entries over all layers.
++
++    ``pyramid`` is PyramidKV's linear schedule (KVCache-Factory) with a float
++    slope and largest-remainder rounding, so the sum is exactly ``total``
++    whenever every layer is long enough.  A layer never gets more than it has.
++    """
++    q_len = max(lengths)
++    if allocation == "pyramidkv" and n_layers > 1:
++        # The schedule of this repo's PyramidKVCache, integer step included.  Its
++        # sum is above ``total`` (about +12% for LLaVA-1.5-7B at ratio 0.9); use it
++        # to hold exactly as many entries per layer as that baseline does.
++        past_average = max(0, int(total) // n_layers - window)
++        if q_len < past_average * 2:
++            caps = [past_average] * n_layers
++        else:
++            min_num = int(past_average // beta)
++            max_num = past_average * 2 - min_num
++            if max_num >= q_len - window:
++                max_num = q_len - window
++                min_num = past_average * 2 - max_num
++            steps = (max_num - min_num) // (n_layers - 1)
++            caps = [max_num - layer * steps for layer in range(n_layers)]
++        return [min(max(0, cap) + window, length) for cap, length in zip(caps, lengths)]
++    past_total = max(0, int(total) - n_layers * window)
++    average = past_total / float(n_layers)
++    if allocation == "uniform" or n_layers < 2 or q_len < average * 2:
++        values = [average] * n_layers
++    else:
++        min_num = float(int(average // beta))
++        max_num = average * 2 - min_num
++        if max_num >= q_len - window:
++            max_num = max(float(q_len - window), average)
++            min_num = average * 2 - max_num
++        slope = (max_num - min_num) / (n_layers - 1)
++        values = [max_num - layer * slope for layer in range(n_layers)]
++    caps = [int(x) for x in values]
++    order = sorted(range(n_layers), key=lambda i: values[i] - caps[i], reverse=True)
++    for layer in order[:max(0, past_total - sum(caps))]:
++        caps[layer] += 1
++    return [min(cap + window, length) for cap, length in zip(caps, lengths)]
++
++
++class SeedKVCache:
++    """Multi-turn KV eviction that regenerates the prefill instead of retaining it."""
++
++    def __init__(
++        self,
++        layer_num,
++        ratio=0.0,
++        image_start=None,
++        image_token_len=0,
++        k_seq_dim=2,
++        v_seq_dim=2,
++        window_size=8,
++        kernel_size=7,
++        pooling="maxpool",
++        allocation="pyramid",
++        beta=20.0,
++        seed="auto",
++        charge_seed=True,
++        max_hydrated_tokens=0,
++        refresh_every=0,
++        regenerate=True,
++    ):
++        if k_seq_dim != 2 or v_seq_dim != 2:
++            raise ValueError("SeedKVCache expects KV layout [batch, heads, seq, dim]")
++        if not 0.0 <= float(ratio) < 1.0:
++            raise ValueError("ratio must satisfy 0 <= ratio < 1")
++        if int(window_size) < 1:
++            raise ValueError("window_size must be at least 1")
++        if int(kernel_size) < 1 or int(kernel_size) % 2 == 0:
++            raise ValueError("kernel_size must be a positive odd number")
++        if pooling not in {"maxpool", "avgpool"}:
++            raise ValueError("pooling must be 'maxpool' or 'avgpool'")
++        if allocation not in {"pyramid", "pyramidkv", "uniform"}:
++            raise ValueError("allocation must be 'pyramid', 'pyramidkv' or 'uniform'")
++        if seed not in {"auto", "features", "embeds"}:
++            raise ValueError("seed must be 'auto', 'features' or 'embeds'")
++        self.layer_num = int(layer_num)
++        self.ratio = float(ratio)
++        self.image_start = None if image_start is None else int(image_start)
++        self.image_len = int(image_token_len)
++        self.window_size = int(window_size)
++        self.kernel_size = int(kernel_size)
++        self.pooling = pooling
++        self.allocation = allocation
++        self.beta = float(beta)
++        self.seed_mode = seed
++        self.charge_seed = bool(charge_seed)
++        self.max_hydrated_tokens = int(max_hydrated_tokens)
++        self.refresh_every = int(refresh_every)
++        # regenerate=False is the ablation: same scoring, budgets and code, but
++        # retain-only (the prefill entries that survive are kept across turns).
++        self.regenerate = bool(regenerate)
++        self._inner = None
++        self._projector = None
++        self._hooks = []
++        self.reset()
++
++    # ------------------------------------------------------------------
++    # State
++    # ------------------------------------------------------------------
++    def reset(self):
++        """Reset all state at the beginning of a NEW conversation."""
++        self._remove_hooks()
++        self.state = "init"            # init -> compressed -> rest -> hydrated -> compressed ...
++        self._window = None            # per layer: list of [heads, rows, keys] attention blocks
++        self._pos = None               # per layer: [kv_heads, entries] logical positions
++        self._a_count = None           # per layer: prefill entries at the front of the layout
++        self._pending_prefill = False
++        self._raw_embeds = None
++        self._raw_features = None
++        self._raw_ids = []
++        self._seed = None
++        self._busy = False
++        self._answer_begun = False
++        self._refreshing = False
++        self.n0 = 0                    # prefill length = the regenerable region
++        self.n_logical = 0
++        self.boundary_logical = 0
++        self.hydrated_tokens = 0
++        self.tokens_since_commit = 0
++        self.turn_index = 0
++        self.seed_bytes = 0
++        self.seed_kind = None
++        self.charge = 0                # seed size in KV entries (one K and one V of one layer)
++        self.rehydrations = 0
++        self.rehydrate_seconds = 0.0
++        self.last_layer_budgets = None
++        self.last_finalize_stats = None
++
++    def _remove_hooks(self):
++        for handle in getattr(self, "_hooks", []):
++            handle.remove()
++        self._hooks = []
++
++    # ------------------------------------------------------------------
++    # The seed
++    # ------------------------------------------------------------------
++    def attach_model(self, model):
++        """Give the cache the model (to regenerate) and capture the seed at prefill."""
++        self._inner = model.get_model() if hasattr(model, "get_model") else getattr(model, "model", model)
++        self._remove_hooks()
++        if self.ratio <= 0 or not self.regenerate:
++            return
++        self._hooks.append(
++            self._inner.register_forward_pre_hook(self._capture_embeds, with_kwargs=True))
++        self._projector = getattr(self._inner, "mm_projector", None)
++        if self._projector is not None and self.seed_mode != "embeds":
++            self._hooks.append(self._projector.register_forward_hook(self._capture_features))
++            self._hooks.append(
++                self._inner.get_input_embeddings().register_forward_hook(self._capture_ids))
++
++    def _capture_embeds(self, module, args, kwargs):
++        if self._busy or self._raw_embeds is not None or kwargs.get("past_key_values") is not None:
++            return None
++        embeds = kwargs.get("inputs_embeds")
++        if embeds is None:
++            input_ids = kwargs.get("input_ids", args[0] if args else None)
++            if input_ids is None or input_ids.shape[1] < 2:
++                return None
++            embeds = module.get_input_embeddings()(input_ids)
++        if embeds.shape[1] < 2:
++            return None
++        self._raw_embeds = embeds.detach()
++        return None
++
++    def _capture_features(self, module, args, output):
++        if self._busy or self._raw_features is not None:
++            return
++        self._raw_features = args[0].detach()
++
++    def _capture_ids(self, module, args, output):
++        # LLaVA embeds the text before and after the image in separate calls.
++        if self._busy or self._raw_embeds is not None:
++            return
++        self._raw_ids.append(args[0].detach())
++
++    def _build_seed(self, past_key_values):
++        embeds = self._raw_embeds
++        if embeds is None:
++            raise RuntimeError(
++                "SeedKV did not see the prefill inputs. Call cache.attach_model(model) "
++                "before the multimodal prefill forward.")
++        if embeds.shape[0] != 1 or embeds.shape[1] != self.n0:
++            raise RuntimeError(
++                f"SeedKV: prefill embeddings have shape {tuple(embeds.shape)}, "
++                f"expected [1, {self.n0}, hidden]")
++        features = self._raw_features
++        image_end = None if self.image_start is None else self.image_start + self.image_len
++        use_features = (
++            self.seed_mode != "embeds"
++            and features is not None
++            and self.image_start is not None
++            and features.dim() == 3
++            and features.shape[0] == 1
++            and features.shape[1] == self.image_len
++            and image_end <= self.n0
++        )
++        if use_features:
++            # The features must rebuild this prefill's image embeddings.
++            reference = embeds[:, self.image_start: image_end]
++            rebuilt = self._projector(features)
++            use_features = rebuilt.shape == reference.shape and torch.allclose(
++                rebuilt.float(), reference.float(), rtol=1e-2, atol=1e-3)
++        if self.seed_mode == "features" and not use_features:
++            raise RuntimeError("SeedKV: seed='features' needs one image and an mm_projector")
++        if use_features:
++            text = self._text_ids_seed(embeds, image_end)
++            if text is None:
++                # .clone() so that the full prefill embeddings can be freed.
++                text = (embeds[:, : self.image_start].clone(), embeds[:, image_end:].clone())
++                self.seed_kind = "features+embeds"
++            else:
++                self.seed_kind = "features+ids"
++            self._seed = (text[0], features.clone(), text[1])
++        else:
++            self._seed = (embeds.clone(),)
++            self.seed_kind = "embeds"
++        self._raw_embeds = None
++        self._raw_features = None
++        self._raw_ids = []
++        self._remove_hooks()
++
++        self.seed_bytes = sum(t.numel() * t.element_size() for t in self._seed)
++        key = past_key_values[0][0]
++        entry_bytes = 2 * key.shape[1] * key.shape[3] * key.element_size()   # one K and one V
++        self.charge = int(math.ceil(self.seed_bytes / float(entry_bytes))) if self.charge_seed else 0
++
++    def _text_ids_seed(self, embeds, image_end):
++        """Token ids of the text before/after the image, if they give back its embeddings."""
++        ids = self._raw_ids
++        if len(ids) != 2 or any(x.dim() != 1 or x.is_floating_point() for x in ids):
++            return None
++        if ids[0].numel() != self.image_start or ids[1].numel() != self.n0 - image_end:
++            return None
++        prefix, suffix = self._embed_text(ids[0], ids[1])
++        if not torch.equal(prefix.to(embeds.dtype), embeds[:, : self.image_start]):
++            return None
++        if not torch.equal(suffix.to(embeds.dtype), embeds[:, image_end:]):
++            return None
++        return ids[0].clone(), ids[1].clone()
++
++    def _embed_text(self, prefix, suffix):
++        embed = self._inner.get_input_embeddings()
++        was_busy, self._busy = self._busy, True      # keep the capture hooks quiet
++        try:
++            return embed(prefix)[None], embed(suffix)[None]
++        finally:
++            self._busy = was_busy
++
++    def _assemble(self, prefix, features, suffix):
++        image = self._projector(features)
++        if not prefix.is_floating_point():
++            prefix, suffix = self._embed_text(prefix, suffix)
++        return torch.cat([prefix.to(image.dtype), image, suffix.to(image.dtype)], dim=1)
++
++    def _seed_embeds(self):
++        if len(self._seed) == 1:
++            return self._seed[0]
++        return self._assemble(*self._seed)
++
++    @torch.no_grad()
++    def _regenerate(self):
++        """One forward over the prefill embeddings -> its KV for every layer."""
++        if self._inner is None or self._seed is None:
++            raise RuntimeError("SeedKV cannot regenerate: attach_model() or the prefill is missing")
++        start = time.perf_counter()
++        self._busy = True
++        try:
++            out = self._inner(
++                inputs_embeds=self._seed_embeds(),
++                use_cache=True,
++                output_attentions=False,
++                output_hidden_states=False,
++                return_dict=True,
++            )
++        finally:
++            self._busy = False
++        self.rehydrations += 1
++        self.rehydrate_seconds += time.perf_counter() - start
++        return out.past_key_values
++
++    # ------------------------------------------------------------------
++    # Attention window (PyramidKV's observation window)
++    # ------------------------------------------------------------------
++    def observe_layer(self, layer_idx, attention):
++        """Keep the attention rows of the most recent ``window_size`` queries."""
++        if self.ratio <= 0:
++            return
++        if attention.dim() != 4 or attention.shape[0] != 1:
++            raise RuntimeError(f"Expected [1, heads, queries, keys], got {tuple(attention.shape)}")
++        query_len = attention.shape[-2]
++        if self._window is None:
++            self._window = [[] for _ in range(self.layer_num)]
++        if query_len > 1:
++            # Copy only the window rows so the full prefill map can be freed.
++            self._window[layer_idx] = [attention[0, :, -self.window_size:, :].clone()]
++            if self.state == "init":
++                self._pending_prefill = True
++        else:
++            blocks = self._window[layer_idx]
++            blocks.append(attention[0])
++            if len(blocks) > self.window_size:
++                del blocks[: len(blocks) - self.window_size]
++
++    def _reset_window(self):
++        self._window = [[] for _ in range(self.layer_num)]
++
++    def _window_rows(self, layer_idx, length):
++        """Last <= W rows of this layer as float32 [heads, rows, length], or None."""
++        blocks = self._window[layer_idx] if self._window is not None else None
++        if not blocks:
++            return None
++        padded = [F.pad(block.float(), (0, length - block.shape[-1])) for block in blocks]
++        return torch.cat(padded, dim=1)[:, -self.window_size:, :]
++
++    def _scores(self, rows, kv_heads):
++        """PyramidKV's score: window attention summed over queries, pooled over keys."""
++        scores = rows.sum(dim=1)                                  # [heads, keys]
++        if scores.shape[0] != kv_heads:                           # GQA: average the group
++            scores = scores.view(kv_heads, -1, scores.shape[-1]).mean(dim=1)
++        if scores.shape[-1] == 0 or self.kernel_size == 1:
++            return scores
++        pool = F.max_pool1d if self.pooling == "maxpool" else F.avg_pool1d
++        return pool(scores.unsqueeze(0), kernel_size=self.kernel_size,
++                    padding=self.kernel_size // 2, stride=1).squeeze(0)
++
++    # ------------------------------------------------------------------
++    # Budgets
++    # ------------------------------------------------------------------
++    def _capacity(self, logical_len):
++        """Entries over all layers for this logical length: L * C minus the seed."""
++        nominal = self.layer_num * max(1, int(logical_len * (1.0 - self.ratio)))
++        return max(2 * self.layer_num, nominal - self.charge)
++
++    def _commit_capacity(self):
++        """What a boundary-only method holds now: its last budget plus the appended tokens."""
++        appended = self.n_logical - self.boundary_logical
++        return self._capacity(self.boundary_logical) + self.layer_num * appended
++
++    def _budgets(self, capacity, lengths):
++        window = max(1, min(self.window_size, capacity // self.layer_num - 1))
++        return layer_budgets(self.layer_num, capacity, window, lengths, self.allocation, self.beta)
++
++    def _full_pos(self, layer_idx, length, heads):
++        """Logical position of every physical entry, including appended tokens."""
++        pos = self._pos[layer_idx]
++        extra = length - pos.shape[1]
++        if extra < 0:
++            raise RuntimeError(f"SeedKV layer {layer_idx}: bookkeeping longer than the KV")
++        if extra == 0:
++            return pos
++        new = torch.arange(self.n_logical - extra, self.n_logical, device=pos.device)
++        return torch.cat([pos, new.view(1, -1).expand(heads, -1)], dim=1)
++
++    @staticmethod
++    def _gather(tensor, index):
++        gather = index.to(tensor.device)[None, :, :, None]
++        return tensor.gather(2, gather.expand(tensor.shape[0], -1, -1, tensor.shape[-1]))
++
++    # ------------------------------------------------------------------
++    # Commit: image and text together, with the current question in view
++    # ------------------------------------------------------------------
++    def _commit(self, past_key_values, capacity, stage):
++        lengths = [k.shape[2] for k, _ in past_key_values]
++        budgets = self._budgets(capacity, lengths)
++        new_past, kept, image_kept = [], [], []
++        for layer_idx, (key, value) in enumerate(past_key_values):
++            length, heads = lengths[layer_idx], key.shape[1]
++            pos = self._full_pos(layer_idx, length, heads)
++            a_count = self._a_count[layer_idx]
++            budget = budgets[layer_idx]
++            rows = self._window_rows(layer_idx, length)
++            if rows is None or budget >= length:
++                self._pos[layer_idx] = pos
++                new_past.append((key, value))
++                kept.append(length)
++                image_kept.append(a_count)
++                continue
++
++            window = max(1, min(rows.shape[1], budget - 1))
++            past_len = length - window
++            keep_past = max(0, budget - window)
++            scores = self._scores(rows[:, -window:, :past_len], heads)
++            a_past = min(a_count, past_len)          # prefill entries sit at the front
++            b_past = past_len - a_past
++            if a_past > 0:
++                scores[:, 0] = float("inf")           # the attention sink (logical position 0)
++
++            # Split the layer budget between prefill and dialogue entries the way
++            # an unconstrained per-head top-k would on average, then let every
++            # head choose its own entries inside each part.
++            if b_past == 0 or a_past == 0:
++                n_a = min(a_past, keep_past)
++            else:
++                joint = scores.topk(keep_past, dim=-1).indices
++                n_a = int(torch.round((joint < a_past).sum(dim=-1).float().mean()).item())
++                n_a = max(min(1, keep_past), min(n_a, a_past, keep_past))
++            n_b = min(keep_past - n_a, b_past)
++            n_a = min(a_past, keep_past - n_b)
++
++            parts = []
++            if n_a > 0:
++                parts.append(scores[:, :a_past].topk(n_a, dim=-1).indices.sort(dim=-1).values)
++            if n_b > 0:
++                parts.append(scores[:, a_past:].topk(n_b, dim=-1).indices.sort(dim=-1).values + a_past)
++            parts.append(torch.arange(past_len, length, device=scores.device).expand(heads, -1))
++            index = torch.cat(parts, dim=-1)
++
++            new_past.append((self._gather(key, index), self._gather(value, index)))
++            self._pos[layer_idx] = pos.gather(1, index.to(pos.device))
++            self._a_count[layer_idx] = n_a + max(0, a_count - past_len)
++            kept.append(index.shape[1])
++            image_kept.append(self._a_count[layer_idx])
++
++        self._reset_window()
++        self.state = "compressed"
++        self._refreshing = False
++        self.tokens_since_commit = 0
++        self.last_layer_budgets = kept
++        self.last_finalize_stats = {
++            "stage": stage,
++            "turn": self.turn_index + 1,
++            "logical_len": int(self.n_logical),
++            "target_total": int(capacity),
++            "seed": self.seed_kind,
++            "seed_charge_total": int(self.charge),
++            "kv_before_mean": float(sum(lengths) / len(lengths)),
++            "kv_after_mean": float(sum(kept) / len(kept)),
++            "prefill_entries_mean": float(sum(image_kept) / len(image_kept)),
++            "rehydrations": int(self.rehydrations),
++            "layer_budgets": kept,
++        }
++        return tuple(new_past)
++
++    # ------------------------------------------------------------------
++    # Rest: drop the regenerable prefill, keep dialogue text
++    # ------------------------------------------------------------------
++    def _rest(self, past_key_values):
++        capacity = self._capacity(self.n_logical)
++        a_counts = list(self._a_count)
++        lengths = [k.shape[2] - a for (k, _), a in zip(past_key_values, a_counts)]
++        budgets = self._budgets(capacity, lengths)
++        new_past, kept = [], []
++        for layer_idx, (key, value) in enumerate(past_key_values):
++            full, heads = key.shape[2], key.shape[1]
++            a_count, length, budget = a_counts[layer_idx], lengths[layer_idx], budgets[layer_idx]
++            pos = self._full_pos(layer_idx, full, heads)[:, a_count:]
++            key, value = key[:, :, a_count:], value[:, :, a_count:]
++            rows = self._window_rows(layer_idx, full)
++            self._a_count[layer_idx] = 0
++            if budget >= length:
++                # Nothing to evict.  .contiguous() releases the dropped prefill.
++                self._pos[layer_idx] = pos
++                new_past.append((key.contiguous(), value.contiguous()))
++                kept.append(length)
++                continue
++            if rows is None:
++                # No attention since the last layout change: keep the newest text.
++                index = torch.arange(length - budget, length, device=pos.device).expand(heads, -1)
++            else:
++                rows = rows[:, :, a_count:]
++                window = max(1, min(rows.shape[1], budget - 1))
++                past_len = length - window
++                scores = self._scores(rows[:, -window:, :past_len], heads)
++                top = scores.topk(max(0, budget - window), dim=-1).indices.sort(dim=-1).values
++                tail = torch.arange(past_len, length, device=top.device).expand(heads, -1)
++                index = torch.cat([top, tail], dim=-1)
++            new_past.append((self._gather(key, index), self._gather(value, index)))
++            self._pos[layer_idx] = pos.gather(1, index.to(pos.device))
++            kept.append(index.shape[1])
++
++        self._reset_window()
++        self.state = "rest"
++        self.boundary_logical = int(self.n_logical)
++        self.last_layer_budgets = kept
++        self.last_finalize_stats = {
++            "stage": "turn_boundary",
++            "turn": self.turn_index + 1,
++            "logical_len": int(self.n_logical),
++            "target_total": int(capacity),
++            "seed": self.seed_kind,
++            "seed_charge_total": int(self.charge),
++            "kv_before_mean": float(sum(l + a for l, a in zip(lengths, a_counts)) / len(lengths)),
++            "kv_after_mean": float(sum(kept) / len(kept)),
++            "prefill_entries_mean": 0.0,
++            "rehydrations": int(self.rehydrations),
++            "layer_budgets": kept,
++        }
++        return tuple(new_past)
++
++    # ------------------------------------------------------------------
++    # Hydrate: put the full prefill back in front of the dialogue entries
++    # ------------------------------------------------------------------
++    def _hydrate(self, past_key_values):
++        region = self._regenerate()
++        new_past = []
++        for layer_idx, (key, value) in enumerate(past_key_values):
++            a_count, heads = self._a_count[layer_idx], key.shape[1]
++            key_a, value_a = region[layer_idx]
++            new_past.append((
++                torch.cat([key_a.to(key.device, key.dtype), key[:, :, a_count:]], dim=2),
++                torch.cat([value_a.to(value.device, value.dtype), value[:, :, a_count:]], dim=2),
++            ))
++            pos = self._pos[layer_idx]
++            front = torch.arange(self.n0, device=pos.device).view(1, -1).expand(heads, -1)
++            self._pos[layer_idx] = torch.cat([front, pos[:, a_count:]], dim=1)
++            self._a_count[layer_idx] = self.n0
++        self._reset_window()
++        self.state = "hydrated"
++        self.hydrated_tokens = 0
++        return tuple(new_past)
++
++    # ------------------------------------------------------------------
++    # Evaluator interface
++    # ------------------------------------------------------------------
++    def begin_answer(self):
++        """The question of this turn has been read; commit at the next call."""
++        self._answer_begun = True
++
++    def prepare_turn(self, past_key_values, num_of_token=None):
++        """Call before feeding a later turn's tokens: regenerate the prefill KV."""
++        if past_key_values is None or self.ratio <= 0 or self.state != "rest" or not self.regenerate:
++            return past_key_values
++        return self._hydrate(past_key_values)
++
++    def __call__(self, past_key_values, num_of_token=None, attentions=None):
++        if past_key_values is None:
++            return None
++        if num_of_token is None:
++            raise ValueError("SeedKVCache requires num_of_token for ratio-based pruning.")
++        if self.ratio <= 0:
++            return past_key_values
++        if len(past_key_values) != self.layer_num:
++            raise ValueError(f"Expected {self.layer_num} layers, got {len(past_key_values)}")
++
++        # Fallback when attentions are returned normally instead of the online hook.
++        has_attention = attentions is not None and attentions[0] is not None
++        lazy = self.state == "rest"        # prepare_turn() was not called for this turn
++        if has_attention and not lazy:
++            if len(attentions) != self.layer_num:
++                raise ValueError("One attention tensor per transformer layer is required")
++            for layer_idx, attention in enumerate(attentions):
++                self.observe_layer(layer_idx, attention)
++        self.n_logical = int(num_of_token)
++
++        if self._pending_prefill:
++            self._pending_prefill = False
++            first = past_key_values[0][0]
++            if first.shape[0] != 1:
++                raise ValueError("SeedKVCache supports batch size 1 only")
++            self.n0 = int(first.shape[2])
++            if self.regenerate:
++                self._build_seed(past_key_values)
++            self._pos = []
++            for key, _ in past_key_values:
++                self._pos.append(
++                    torch.arange(self.n0, device=key.device).view(1, -1).expand(key.shape[1], -1))
++            self._a_count = [self.n0] * self.layer_num
++            self.boundary_logical = self.n0
++            return self._commit(past_key_values, self._commit_capacity(), stage="prefill")
++
++        if self.state == "init":
++            raise ValueError(
++                "SeedKVCache must observe the multimodal prefill first "
++                "(output_attentions=True or the online attention hook).")
++
++        if lazy:
++            _warn_once(
++                "lazy",
++                "SeedKV: prepare_turn() was not called, so the first token of each later "
++                "turn is computed before the image is regenerated.")
++            return self._hydrate(past_key_values)
++
++        if not has_attention:
++            raise ValueError("SeedKVCache requires decoding attention (output_attentions=True).")
++
++        if self.state == "hydrated":
++            self.hydrated_tokens += 1
++            if self._refreshing:
++                ready = self.hydrated_tokens >= self.window_size
++            else:
++                ready = self._answer_begun or 0 < self.max_hydrated_tokens <= self.hydrated_tokens
++            if ready:
++                return self._commit(past_key_values, self._commit_capacity(), stage="commit")
++            return past_key_values
++
++        # Compressed: append only.  Optionally refresh the image during a long answer.
++        self.tokens_since_commit += 1
++        if (self.refresh_every > 0 and self.regenerate and self._answer_begun
++                and self.tokens_since_commit >= self.refresh_every):
++            self._refreshing = True
++            return self._hydrate(past_key_values)
++        return past_key_values
++
++    def finalize_turn(self, past_key_values):
++        """Turn boundary: drop the prefill entries and compress the dialogue text."""
++        if past_key_values is None or self.ratio <= 0 or self.state == "init":
++            return past_key_values
++        if self.state == "hydrated" and not self._refreshing:
++            _warn_once(
++                "no_commit",
++                "SeedKV: a turn ended before the commit. Call cache.begin_answer() once the "
++                "question has been fed, or set max_hydrated_tokens.")
++        if self.regenerate:
++            result = self._rest(past_key_values)
++        else:
++            # Ablation: compress prefill and dialogue together and keep both.
++            self.boundary_logical = int(self.n_logical)
++            result = self._commit(past_key_values, self._commit_capacity(), stage="turn_boundary")
++        self._answer_begun = False
++        self._refreshing = False
++        self.turn_index += 1
++        return result
+diff --git a/run-job-seedkv b/run-job-seedkv
+new file mode 100644
+index 0000000..c102cb3
+--- /dev/null
++++ b/run-job-seedkv
+@@ -0,0 +1,80 @@
++#!/bin/bash
++
++#SBATCH --time=24:00:00   # walltime limit (HH:MM:SS)
++#SBATCH --nodes=1   # number of nodes
++#SBATCH --ntasks-per-node=1
++#SBATCH --mem=100G   # maximum memory per node
++#SBATCH --gres=gpu:a100:1
++#SBATCH --partition=nova
++#SBATCH --job-name="seedkv"
++#SBATCH --error="%j-error"
++#SBATCH --output="seedkv-%j.out"
++
++# SeedKV against PyramidKV and TurnCast-KV on ConvBench and MultiVerse.
++#
++#   sbatch run-job-seedkv                                    # everything, ratios 0.9 0.8 0.5
++#   sbatch --export=ALL,RATIOS="0.95",STAGES="ppl" run-job-seedkv
++#   sbatch --export=ALL,METHODS="seedkv",SEEDKV_ARGS="--seedkv-no-regenerate",TAG="-retain",STAGES="ppl rouge" run-job-seedkv
++#
++# STAGES: any of  ppl rouge efficiency
++# METHODS: any --method name; SeedKV needs no trained file.
++
++source /lustre/hdd/LAS/jannesar-lab/tmahmud/ecache/bin/activate
++
++ROOT=/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache
++MODEL=${MODEL:-/lustre/hdd/LAS/jannesar-lab/tmahmud/models/llava-v1.5-7b}
++RATIOS=${RATIOS:-"0.9 0.8 0.5"}
++METHODS=${METHODS:-"pyramidkv turncast_kv seedkv"}
++STAGES=${STAGES:-"ppl rouge efficiency"}
++SAMPLES_ARG=${SAMPLES:+--eval-samples $SAMPLES}     # default: all conversations
++MAXTOK=${MAXTOK:-512}
++# Extra flags for SeedKV only, e.g. "--seedkv-allocation pyramidkv" (same entries
++# per layer as PyramidKVCache) or "--seedkv-no-regenerate" (the ablation).
++SEEDKV_ARGS=${SEEDKV_ARGS:-}
++TAG=${TAG:-}
++
++declare -A DATA IMAGES
++DATA[Convbench]=$ROOT/ConvBench/convbench.json
++IMAGES[Convbench]=$ROOT/ConvBench/visit_bench_images
++DATA[MultiVerse]=$ROOT/MultiVerse_for_ppl/multiverse_ppl_full.json
++IMAGES[MultiVerse]=$ROOT/MultiVerse_raw/images
++
++for DATASET in Convbench MultiVerse; do
++  for RATIO in $RATIOS; do
++    for METHOD in $METHODS; do
++      NAME=${DATASET}-${RATIO}-${METHOD}
++      EXTRA=""
++      if [[ "$METHOD" == "seedkv" ]]; then
++        EXTRA="$SEEDKV_ARGS"
++        NAME=${NAME}${TAG}
++      fi
++
++      if [[ " $STAGES " == *" ppl "* ]]; then
++        python eval_ppl_final.py \
++          --model-path $MODEL \
++          --data-path ${DATA[$DATASET]} --image-path ${IMAGES[$DATASET]} \
++          $SAMPLES_ARG \
++          --method $METHOD --ratio $RATIO $EXTRA \
++          --output-dir logs_ppl_llava/seedkv --exp-name $NAME
++      fi
++
++      if [[ " $STAGES " == *" rouge "* ]]; then
++        python eval_rouge_final2.py \
++          --model-path $MODEL \
++          --data-path ${DATA[$DATASET]} --image-path ${IMAGES[$DATASET]} \
++          $SAMPLES_ARG --max-token-generated $MAXTOK \
++          --method $METHOD --ratio $RATIO $EXTRA \
++          --output-dir logs_rouge_llava/seedkv/$NAME
++      fi
++    done
++  done
++done
++
++# Latency, throughput and memory.  SeedKV's regeneration is inside TTFT of
++# turns 2+, and the question-reading peak shows up as kv_transient/kv_peak.
++if [[ " $STAGES " == *" efficiency "* ]]; then
++  python eval_efficiency.py \
++    --methods full $METHODS \
++    --ratios $RATIOS \
++    --context-lengths native --gen-tokens 64 --num-turns 3
++fi
+diff --git a/seedkv/README.md b/seedkv/README.md
+new file mode 100644
+index 0000000..f7dea08
+--- /dev/null
++++ b/seedkv/README.md
+@@ -0,0 +1,262 @@
++# SeedKV: evict the image to a seed, regrow it when the next question arrives
++
++SeedKV is a multi-turn KV-cache policy for LLaVA. Between turns it keeps **no
++image KV at all**, only a small seed (the vision features and the prompt's
++token ids). When the next question arrives it regenerates the image KV
++exactly, reads the question with the whole image visible, and then selects
++image and text entries together down to the usual budget.
++
++Every other method in this repo only retains. It decides which visual entries
++survive before the next question exists, and an evicted entry never comes
++back.
++
++## Why
++
++Your own logs say that better scoring has little left to give:
++
++* `turncast_data/turncast_scorer_report.json`, ConvBench, ratio 0.9: PyramidKV
++  captures 91% of the attention later turns pay, and an oracle that knows the
++  true future attention captures 94%.
++* The 2026 audit "Seen, Said, or Forgotten?" (arXiv 2607.25467, on ConvBench
++  and VisDial) reports that current attention is a poor predictor of which
++  visual entries a later turn needs, and that the damage from deleting them is
++  irreversible and grows over turns.
++
++So the lever SeedKV pulls is different: do not predict the next question,
++wait for it. That is affordable because the prefill prompt
++(`<system> USER: Q1 <image> ASSISTANT:`) sits at the start of the context.
++Its KV depends on nothing that comes later, so one batched forward over its
++input embeddings rebuilds it exactly, at any turn.
++
++## How
++
++| Step | When | What |
++|---|---|---|
++| 1 | Turn-1 prefill | Keep the seed. Compress the prefill to the budget (the question is in view). |
++| 2 | Turn boundary (`finalize_turn`) | Drop every prefill entry. Compress the dialogue text to the budget. |
++| 3 | Next turn (`prepare_turn`) | Regenerate the full prefill KV from the seed: one forward of the prefill length. |
++| 4 | Commit (first cache call after `begin_answer`) | The question has been read with the whole image visible. Select image and text entries together from its attention. |
++
++* **Scoring** is PyramidKV's rule: attention of the last 8 queries, max-pool 7,
++  per-head top-k. Nothing is trained. What is new is where and when the rule
++  runs.
++* **Layer budgets** follow PyramidKV's linear pyramid with an exact total.
++* **Heads** keep their own entries. All heads of a layer keep the same number
++  of image entries and the same number of text entries, so the tensors stay
++  rectangular after the image is dropped.
++* **The attention sink** (position 0) is kept whenever prefill entries are
++  resident.
++
++## Budget
++
++`C(n) = int(n * (1 - ratio))` entries per layer on average, like the other
++methods, **minus the seed's own size**, so KV + seed never exceeds `L * C`.
++
++| Moment | Entries held |
++|---|---|
++| After the Turn-1 prefill | `L * C(prefill length)` |
++| At rest between turns | at most `L * C(logical length)`, text only |
++| After a turn's commit, during generation | `L * (C(length at last boundary) + tokens appended since)` |
++| While a later turn's question is read | the full prefill KV + the text (the size every method holds during the Turn-1 prefill, before its first compression) |
++
++Seed size for LLaVA-1.5-7B: 576 x 1024 CLIP features in 16-bit floats =
++1.2 MB, against about 300 MB for the image KV over 32 layers. That is charged
++as about 72 KV entries, 2.25 per layer (the budget is 64 per layer after a
++640-token prefill at ratio 0.9).
++
++**PyramidKVCache holds more than `L * C`.** `kv_cache_pyramidkv.py` rounds the
++pyramid's slope down, which leaves extra entries in the deep layers. For 32
++layers and a 640-token prefill it keeps 2288 entries at ratio 0.9 against a
++nominal 2048 (+11.7%), and +23% at ratio 0.95. SeedKV keeps exactly `L * C`
++by default. For a like-for-like run against that baseline use
++`--seedkv-allocation pyramidkv`, which gives every layer the same number of
++entries PyramidKVCache gives it (minus the seed).
++
++## Cost
++
++One extra forward over the prefill per later turn. In `results.txt` the
++Turn-1 prefill of LLaVA-1.5-7B takes about 103 ms and TTFT of later turns is
++about 900 ms, so expect roughly +0.1 s per later turn. `eval_efficiency.py`
++measures it: the regeneration is inside TTFT of turns 2+, and the
++question-reading peak shows up in `kv_peak_bytes` / `kv_transient_peak_bytes`.
++
++## Options
++
++| Flag | Default | Meaning |
++|---|---|---|
++| `--seedkv-window-size` | 8 | Observation window, as in PyramidKV. |
++| `--seedkv-allocation` | `pyramid` | Per-layer budgets. `pyramid`: PyramidKV's schedule with an exact total. `pyramidkv`: the same entries per layer as this repo's PyramidKVCache. `uniform`: equal. |
++| `--seedkv-seed` | `auto` | What is stored: `auto` picks the smallest that rebuilds the prefill exactly. |
++| `--seedkv-refresh-every` | 0 | Also regenerate and reselect every N answer tokens (the full image is resident for 8 tokens each time). |
++| `--seedkv-no-seed-charge` | off | Ablation: do not subtract the seed from the budget. |
++| `--seedkv-no-regenerate` | off | Ablation: same code, scoring and budgets, but retain-only. |
++
++`--ratio` is the only setting you need.
++
++## Files
++
++| File | Purpose |
++|---|---|
++| `kv_cache_seedkv.py` | The method. |
++| `seedkv/test_seedkv.py` | Correctness checks through the unchanged evaluators. |
++| `seedkv/make_standin.py` | Builds a small LLaVA-architecture model for CPU tests. |
++| `seedkv/run_compare.py` | Runs methods x ratios x splits on that model. |
++| `seedkv/bench_overhead.py` | Cache-code overhead at LLaVA-1.5-7B shapes. |
++| `seedkv/harness.py` | Shared helpers for the three scripts above. |
++| `seedkv/standin_results.json` | Every number in the tables below. |
++| `run-job-seedkv` | Nova job: PPL, ROUGE and efficiency against PyramidKV and TurnCast-KV. |
++
++## What was tested, and where
++
++LLaVA-1.5-7B could not be run where this was developed (no GPU, no access to
++the weights). Everything below ran on CPU on a **stand-in**: an 8-layer
++LLaVA-architecture model built by `make_standin.py`, loaded by
++`llava.model.builder` and driven by the unchanged `eval_ppl_final.py` and
++`eval_rouge_final2.py`. It answers 99% of questions correctly with a full
++cache, so it does read its image. **None of these numbers are LLaVA numbers.**
++
++### Correctness (`python seedkv/test_seedkv.py --standin DIR`): all checks pass
++
++* The regenerated prefill KV equals the original bit for bit (max difference 0).
++* KV + seed is within `L * (C + appended)` at every cache call outside question
++  reading (534 calls checked per ratio). While a question is read the cache is
++  above budget for about 10 tokens per later turn.
++* Per-head positions are sorted and unique, head counts are equal, the sink is
++  kept (4464 layer states checked per ratio).
++* Ratio 0 gives the same perplexity as the full cache.
++* The evaluator runs the same number of forwards as with PyramidKV, plus
++  exactly one regeneration per later turn.
++* Both fallbacks work (no `prepare_turn`, no `begin_answer`); two runs give
++  identical perplexity.
++
++### Quality on the stand-in, ratio 0.9, 100 conversations x 4 turns
++
++Three test sets: **shift** (every later turn asks about an object no earlier
++turn touched), **same** (every later turn asks about the Turn-1 object again),
++**mixed** (the training mix; a quarter of the first turns are "describe the
++image"). Perplexity of the reference answers, lower is better.
++
++| Method | shift: all | turn 1 | later | same: all | turn 1 | later | mixed: all | turn 1 | later |
++|---|---|---|---|---|---|---|---|---|---|
++| Full cache | 1.00 | 1.00 | 1.00 | 1.01 | 1.01 | 1.01 | 1.04 | 1.11 | 1.00 |
++| PyramidKV | 1.78 | 1.62 | 1.84 | 1.50 | 1.65 | 1.46 | 1.98 | 2.49 | 1.73 |
++| TurnCast-KV (scorer trained on the stand-in) | 1.22 | 1.09 | 1.27 | 1.04 | 1.03 | 1.04 | 1.27 | 1.32 | 1.24 |
++| Turn-conditioned coverage | 1.38 | 1.59 | 1.32 | 1.30 | 1.56 | 1.24 | 1.54 | 1.80 | 1.41 |
++| Layerwise eviction (full cache in turn 1) | 1.57 | 1.00 | 1.83 | 1.48 | 1.01 | 1.65 | 1.36 | 1.11 | 1.53 |
++| Layerwise merge (full cache in turn 1) | 1.48 | 1.00 | 1.69 | 1.48 | 1.01 | 1.65 | 1.44 | 1.11 | 1.69 |
++| AtlasKV | 1.61 | 2.84 | 1.32 | 1.47 | 2.39 | 1.28 | 1.83 | 3.21 | 1.30 |
++| TGV-KV | 2.21 | 1.82 | 2.37 | 2.62 | 2.17 | 2.77 | 5.31 | 16.67 | 2.67 |
++| MEDA | 3.07 | 14.87 | 1.80 | 2.78 | 15.89 | 1.70 | 3.76 | 12.28 | 1.85 |
++| LocalCache | 2.80 | 5.05 | 2.29 | 2.37 | 4.25 | 2.00 | 5.29 | 21.84 | 2.26 |
++| ElasticCache | 2.79 | 4.39 | 2.39 | 6.02 | 4.49 | 6.54 | 6.67 | 24.17 | 3.08 |
++| H2O | 18.10 | 9.18 | 22.79 | 15.37 | 4.60 | 21.70 | 19.61 | 13.26 | 24.79 |
++| **SeedKV** | 1.36 | 1.82 | 1.23 | 1.39 | 1.98 | 1.25 | 2.11 | 4.69 | 1.31 |
++| SeedKV, seed not charged | 1.30 | 1.70 | 1.19 | 1.33 | 1.79 | 1.22 | 1.88 | 3.73 | 1.25 |
++| SeedKV with regeneration off (ablation) | 1.84 | 1.70 | 1.89 | 1.57 | 1.79 | 1.51 | 2.35 | 3.73 | 1.77 |
++
++Share of generated answers that equal the reference (%), ratio 0.9:
++
++| Method | shift: all | turn 1 | later | same: all | turn 1 | later | mixed: all | turn 1 | later |
++|---|---|---|---|---|---|---|---|---|---|
++| Full cache | 100 | 100 | 99 | 98 | 99 | 97 | 94 | 76 | 99 |
++| PyramidKV | 38 | 45 | 35 | 54 | 54 | 53 | 38 | 35 | 40 |
++| TurnCast-KV | 76 | 84 | 74 | 94 | 97 | 92 | 69 | 59 | 72 |
++| Turn-conditioned coverage | 71 | 66 | 73 | 69 | 67 | 70 | 63 | 42 | 70 |
++| **SeedKV** | 58 | 30 | 67 | 57 | 33 | 65 | 51 | 22 | 61 |
++| SeedKV with regeneration off (ablation) | 35 | 36 | 34 | 47 | 43 | 49 | 36 | 28 | 39 |
++
++Later-turn perplexity by ratio (shift / same / mixed):
++
++| Method | 0.8 | 0.9 | 0.95 |
++|---|---|---|---|
++| PyramidKV | 1.48 / 1.21 / 1.38 | 1.84 / 1.46 / 1.73 | 2.32 / 1.98 / 2.26 |
++| TurnCast-KV | 1.07 / 1.02 / 1.05 | 1.27 / 1.04 / 1.24 | 2.24 / 1.88 / 2.18 |
++| Turn-conditioned coverage | 1.08 / 1.10 / 1.07 | 1.32 / 1.24 / 1.41 | 2.09 / 2.12 / 2.11 |
++| **SeedKV** | 1.05 / 1.14 / 1.10 | 1.23 / 1.25 / 1.31 | 1.56 / 1.44 / 1.59 |
++| SeedKV with regeneration off | 1.52 / 1.25 / 1.43 | 1.89 / 1.51 / 1.77 | 2.26 / 1.96 / 2.25 |
++
++How to read this:
++
++* **Regeneration is what helps.** With identical code, scoring and budget,
++  switching it on takes later-turn perplexity from 1.89 to 1.23 (shift), 1.51
++  to 1.25 (same) and 1.77 to 1.31 (mixed) at ratio 0.9, and later-turn exact
++  match from 34% to 67% on shift.
++* **SeedKV beats PyramidKV on later turns at every ratio and on every set.**
++  At ratio 0.95 its later turns are also ahead of TurnCast-KV and coverage.
++* **SeedKV does not beat TurnCast-KV or coverage overall on the stand-in at
++  ratio 0.9.** Its first turn is worse than PyramidKV's (exact match 30% vs
++  45% on shift). Turn 1 is PyramidKV's rule with a smaller budget: the seed
++  takes 19 of this model's 144 entries (13%), where on LLaVA-1.5-7B it takes
++  about 72 of 2048 (3.5%), and PyramidKVCache holds 17% more than nominal here.
++* **The stand-in overrates scorers.** It reads its image when it writes the
++  answer, not while it reads the question, so question-time attention is a
++  weak signal and a learned scorer can memorise "objects, not background".
++  The same happened before in this repo: on the earlier CPU model TurnCast-KV
++  reached perplexity 4.86 against PyramidKV's 12.87 (`turncast/README.md`),
++  and on LLaVA the two tied (ROUGE-L 0.2698 vs 0.2661, ConvBench, ratio 0.9). Treat the ablation row as the
++  evidence for the mechanism and the cross-method ranking as provisional.
++* Regeneration and scoring are independent. Using TurnCast-KV's forecaster or
++  the coverage selector at SeedKV's commit is the obvious next step.
++
++`--seedkv-refresh-every 8` brings the first-turn perplexity on **mixed** from
++4.69 to 2.32 (its long "describe" answers), but in this model that keeps the
++full image resident for half of the answer, so it is not a budget-matched
++result.
++
++### Cost
++
++* Cache code at LLaVA-1.5-7B shapes (`bench_overhead.py`, 2 CPU cores, float32):
++  prefill compression 37 ms (PyramidKV 38 ms), decode step 0.12 ms (0.38 ms),
++  and about 0.11 s more per later turn, almost all of it copying the
++  regenerated KV. On a GPU that copy is milliseconds.
++* The regeneration forward is not in those numbers. It is one batched forward
++  over the prefill, which `results.txt` puts at about 103 ms for LLaVA-1.5-7B.
++* On the CPU stand-in a 100-conversation perplexity run took 25.7 s with
++  SeedKV and 19.7 s with PyramidKV (+30%). A CPU is far slower at one batched
++  186-token forward relative to single-token steps than a GPU is, so this
++  overstates the GPU overhead.
++
++## Run it on LLaVA
++
++    sbatch run-job-seedkv
++
++runs PyramidKV, TurnCast-KV and SeedKV on ConvBench and MultiVerse at ratios
++0.9, 0.8 and 0.5 (PPL, ROUGE-L, efficiency). Things to look at first:
++
++1. **Per-turn perplexity of turns 2+**, SeedKV against PyramidKV. That is
++   where the mechanism acts.
++2. `--seedkv-no-regenerate` at the same ratio. It isolates regeneration from
++   everything else.
++3. Ratio 0.95. Your logs show turn-1 ROUGE-L with a full cache (0.2501 on
++   ConvBench) inside the range of the compressed methods at 0.9
++   (0.2467-0.2558), so ROUGE-L against the references has under 0.01 of
++   headroom there.
++
++## Reproduce the stand-in numbers (CPU, about an hour)
++
++    pip install torch==2.1.2 transformers==4.31.0 tokenizers==0.13.3 sentencepiece accelerate==0.21.0 rouge
++    python seedkv/make_standin.py --out /tmp/standin          # ~25 min on 2 cores
++    python seedkv/test_seedkv.py --standin /tmp/standin
++    python seedkv/run_compare.py --standin /tmp/standin --metric ppl \
++        --methods full pyramidkv turn_conditioned_coverage seedkv seedkv_retain_only \
++        --ratios 0.9 --out /tmp/ppl.json
++    python seedkv/bench_overhead.py
++
++`make_standin.py` trains with three aids (fewer-object scenes, a per-patch
++word loss, an attention guide on one head in each of two layers). Without
++them a model this small did not learn to read the image in 6000 steps.
++
++## Related work
++
++* **SparseVILA** (arXiv 2510.17777) keeps the visual cache and retrieves a
++  question-specific subset of it each turn. SeedKV keeps no visual KV at rest.
++* **Conduit** (arXiv 2609.05821) recomputes stale cached visual tokens so a
++  cache can be reused under a changed prefix.
++* **HCache**, **CachedAttention** restore or offload a whole conversation's
++  state between turns.
++* **"Seen, Said, or Forgotten?"** (arXiv 2607.25467) is the audit that
++  motivates not deleting visual KV irreversibly; it does not test re-encoding.
++
++I found no paper that evicts the visual KV to a seed and regenerates it per
++turn inside a fixed eviction budget, but this field moves fast and that is a
++search result, not a guarantee.
+diff --git a/seedkv/bench_overhead.py b/seedkv/bench_overhead.py
+new file mode 100644
+index 0000000..b2f4ac9
+--- /dev/null
++++ b/seedkv/bench_overhead.py
+@@ -0,0 +1,138 @@
++"""Policy-only overhead of SeedKV vs PyramidKV at LLaVA-1.5-7B sizes (no model).
++
++Feeds synthetic attention/KV of the real shapes (32 layers, 32 heads, head dim
++128, 576 image tokens) through both caches for a two-turn conversation and
++reports the wall time of the cache code only.
++
++SeedKV's one extra model pass per later turn (regenerating the prefill KV) is
++NOT in these numbers: it is a batched forward over the prefill, i.e. about the
++Turn-1 prefill time that eval_efficiency.py reports as TTFT1.  Here the
++regenerated KV is supplied by a stub, so "hydrate" is the bookkeeping alone.
++
++Usage: python seedkv/bench_overhead.py [--device cuda] [--ratio 0.9]
++"""
++import argparse
++import os
++import sys
++import time
++
++import torch
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from kv_cache_pyramidkv import PyramidKVCache  # noqa: E402
++from kv_cache_seedkv import SeedKVCache  # noqa: E402
++
++DIM = 128
++
++
++class StubSeedKV(SeedKVCache):
++    """SeedKV whose regeneration returns a stored copy instead of running a model."""
++
++    def _build_seed(self, past_key_values):
++        self._stored = list(past_key_values)   # stands in for the model's regenerated KV
++        self.seed_kind = "stub"
++        self.charge = 72                     # LLaVA-1.5-7B: 576 x 1024 features / (2 x 4096) entries
++
++    def _regenerate(self):
++        self.rehydrations += 1
++        return self._stored
++
++
++def sync(device):
++    if device.type == "cuda":
++        torch.cuda.synchronize()
++
++
++class Clock:
++    def __init__(self, device):
++        self.device, self.times = device, {}
++
++    def run(self, name, fn):
++        sync(self.device)
++        start = time.perf_counter()
++        out = fn()
++        sync(self.device)
++        self.times.setdefault(name, []).append(time.perf_counter() - start)
++        return out
++
++
++def step(cache, past, n, device, dtype, clock, name):
++    past = [(torch.cat([k, k[:, :, -1:]], 2), torch.cat([v, v[:, :, -1:]], 2)) for k, v in past]
++    heads = past[0][0].shape[1]
++    atts = tuple(torch.softmax(torch.randn(1, heads, 1, k.shape[2], device=device), -1).to(dtype) for k, _ in past)
++    return clock.run(name, lambda: cache(past, num_of_token=n, attentions=atts))
++
++
++def run(cache, layers, heads, prompt, question, answer, device, dtype):
++    clock = Clock(device)
++    g = torch.Generator(device="cpu").manual_seed(0)
++    past = [(torch.randn(1, heads, prompt, DIM, generator=g).to(device, dtype),
++             torch.randn(1, heads, prompt, DIM, generator=g).to(device, dtype)) for _ in range(layers)]
++    mask = torch.triu(torch.full((prompt, prompt), -1e4, device=device), 1)
++    for layer in range(layers):
++        att = torch.softmax(torch.randn(1, heads, prompt, prompt, device=device) + mask, -1).to(dtype)
++        clock.run("prefill observe (all layers)", lambda: cache.observe_layer(layer, att))
++    past = clock.run("prefill compress", lambda: cache(past, num_of_token=prompt, attentions=None))
++    n = prompt
++    if hasattr(cache, "begin_answer"):
++        cache.begin_answer()
++    for _ in range(answer):
++        n += 1
++        past = step(cache, past, n, device, dtype, clock, "decode step")
++    past = clock.run("turn boundary", lambda: cache.finalize_turn(past))
++    rest = sum(k.shape[2] for k, _ in past) / layers
++
++    if hasattr(cache, "prepare_turn"):
++        past = clock.run("hydrate (bookkeeping only)", lambda: cache.prepare_turn(past, n))
++    for _ in range(question):
++        n += 1
++        past = step(cache, past, n, device, dtype, clock, "question step")
++    if hasattr(cache, "begin_answer"):
++        cache.begin_answer()
++    n += 1
++    past = step(cache, past, n, device, dtype, clock, "first answer step (SeedKV commits)")
++    for _ in range(answer - 1):
++        n += 1
++        past = step(cache, past, n, device, dtype, clock, "decode step")
++    past = clock.run("turn boundary", lambda: cache.finalize_turn(past))
++
++    out = {}
++    for name, values in clock.times.items():
++        total = sum(values)
++        out[name] = total if name.startswith("prefill observe") else total / len(values)
++    return out, rest
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--device", default="cpu")
++    parser.add_argument("--ratio", type=float, default=0.9)
++    parser.add_argument("--question", type=int, default=32)
++    parser.add_argument("--answer", type=int, default=128)
++    args = parser.parse_args()
++    device = torch.device(args.device)
++    dtype = torch.float16 if device.type == "cuda" else torch.float32
++    layers, heads, prompt = 32, 32, 640
++    pyramid = PyramidKVCache(layer_num=layers, ratio=args.ratio)
++    seed = StubSeedKV(layers, args.ratio, image_start=35, image_token_len=576)
++    a, rest_a = run(pyramid, layers, heads, prompt, args.question, args.answer, device, dtype)
++    b, rest_b = run(seed, layers, heads, prompt, args.question, args.answer, device, dtype)
++    print(f"device {device}, ratio {args.ratio}, {layers} layers x {heads} heads, prefill {prompt} tokens, "
++          f"question {args.question}, answer {args.answer} tokens")
++    print(f"{'cache code only, ms per event':40}{'PyramidKV':>12}{'SeedKV':>12}")
++    for name in b:
++        left = f"{1000 * a[name]:12.3f}" if name in a else f"{'-':>12}"
++        print(f"{name:40}{left}{1000 * b[name]:12.3f}")
++    print(f"{'entries per layer at rest (turn 1)':40}{rest_a:12.1f}{rest_b:12.1f}")
++    def per_turn(times):
++        return 1000 * (times["turn boundary"] + times.get("hydrate (bookkeeping only)", 0.0)
++                       + args.question * times["question step"]
++                       + times["first answer step (SeedKV commits)"]
++                       + (args.answer - 1) * times["decode step"])
++
++    per_turn_a, per_turn_b = per_turn(a), per_turn(b)
++    print(f"{'cache code per later turn, total':40}{per_turn_a:12.1f}{per_turn_b:12.1f}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/seedkv/harness.py b/seedkv/harness.py
+new file mode 100644
+index 0000000..cfc260f
+--- /dev/null
++++ b/seedkv/harness.py
+@@ -0,0 +1,184 @@
++"""Drive the unchanged evaluators from Python on CPU (shared by the SeedKV tests)."""
++import contextlib
++import io
++import json
++import os
++import sys
++
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++REPO = os.path.dirname(HERE)
++sys.path.insert(0, REPO)
++sys.path.insert(0, os.path.join(REPO, "turncast"))
++
++from run_cpu import patched_module  # noqa: E402  (turncast/run_cpu.py: CPU shims only)
++
++_MODULES = {}
++
++
++def _cpu_turncast():
++    """kv_cache_turncast.load_scorer defaults to CUDA; on a CPU-only machine load on CPU."""
++    if torch.cuda.is_available():
++        return
++    import kv_cache_turncast
++    original = kv_cache_turncast.load_scorer
++    if getattr(original, "_cpu_shim", False):
++        return
++
++    def load_scorer(path, device="cpu"):
++        return original(path, "cpu")
++
++    load_scorer._cpu_shim = True
++    kv_cache_turncast.load_scorer = load_scorer
++
++
++def evaluator(script):
++    """The evaluator as a module with parse_cli() and main(args)."""
++    if script not in _MODULES:
++        _MODULES[script] = patched_module(script)
++        _cpu_turncast()
++    return _MODULES[script]
++
++
++def run(script, argv, quiet=True):
++    """Run one evaluation; returns the parsed arguments it ran with."""
++    module = evaluator(script)
++    old_argv = sys.argv
++    sys.argv = [script] + [str(x) for x in argv]
++    try:
++        args = module.parse_cli()
++        sink = io.StringIO()
++        with contextlib.redirect_stdout(sink if quiet else sys.stdout), \
++                contextlib.redirect_stderr(sink if quiet else sys.stderr):
++            module.main(args)
++    finally:
++        sys.argv = old_argv
++    return args
++
++
++def standin_paths(standin, split):
++    return {
++        "model": os.path.join(standin, "llava-v1-standin"),
++        "data": os.path.join(standin, "data", f"eval_{split}.json"),
++        "images": os.path.join(standin, "data", "images"),
++    }
++
++
++def base_argv(standin, split, method, ratio, samples, out_dir, name):
++    paths = standin_paths(standin, split)
++    return [
++        "--model-path", paths["model"], "--data-path", paths["data"], "--image-path", paths["images"],
++        "--device", "cpu", "--method", method, "--ratio", ratio, "--eval-samples", samples,
++        "--output-dir", out_dir, "--exp-name", name,
++    ]
++
++
++def run_ppl(standin, split, method, ratio, samples, out_dir, name, extra=()):
++    run("eval_ppl_final.py", base_argv(standin, split, method, ratio, samples, out_dir, name) + list(extra))
++    with open(os.path.join(out_dir, name + ".json")) as handle:
++        return json.load(handle)
++
++
++def run_rouge(standin, split, method, ratio, samples, out_dir, name, extra=(), max_tokens=24):
++    argv = base_argv(standin, split, method, ratio, samples, out_dir, name)
++    run("eval_rouge_final2.py", argv + ["--max-token-generated", max_tokens] + list(extra))
++    with open(os.path.join(out_dir, name + "_predictions.json")) as handle:
++        return json.load(handle)
++
++
++def exact_match(result):
++    """Share of generated answers equal to the reference, overall and per turn."""
++    per_turn, total = {}, []
++    for item in result["results"]:
++        for turn in item["turns"]:
++            hit = float(" ".join(turn["prediction"].split()) == " ".join(turn["reference"].split()))
++            per_turn.setdefault(str(turn["turn"]), []).append(hit)
++            total.append(hit)
++    mean = lambda values: sum(values) / max(1, len(values))  # noqa: E731
++    return mean(total), {turn: mean(values) for turn, values in sorted(per_turn.items())}
++
++
++class Recorder:
++    """Record the physical cache size after every cache call of one evaluator run.
++
++    events: dicts with kind ("call", "finalize" or "prepare"), the conversation's
++    cache index, the logical length, the entries per layer and the cache state;
++    caches: every cache object the run built.
++    """
++
++    def __init__(self, script, inspect=None, on_build=None):
++        self.module = evaluator(script)
++        self.events = []
++        self.caches = []
++        self.forwards = 0
++        self.inspect = inspect      # fn(kind, cache, past_before, past_after)
++        self.on_build = on_build    # fn(cache), right after the evaluator builds one
++
++    @staticmethod
++    def _sizes(past):
++        return [int(k.shape[2]) for k, _ in past]
++
++    def __enter__(self):
++        module, recorder = self.module, self
++        self._saved = (module.apply_cache, module.finalize_turn_cache, module.build_cache)
++        apply_cache, finalize, build = self._saved
++
++        def note(kind, kv_cache, num_of_token, before, after):
++            recorder.events.append({
++                "kind": kind, "cache": len(recorder.caches) - 1,
++                "logical": None if num_of_token is None else int(num_of_token),
++                "sizes": recorder._sizes(after), "state": getattr(kv_cache, "state", None),
++            })
++            if recorder.inspect is not None:
++                recorder.inspect(kind, kv_cache, before, after)
++
++        def apply_recorded(kv_cache, past, num_of_token, attentions):
++            after = apply_cache(kv_cache, past, num_of_token, attentions)
++            note("call", kv_cache, num_of_token, past, after)
++            return after
++
++        def finalize_recorded(kv_cache, past):
++            after = finalize(kv_cache, past)
++            note("finalize", kv_cache, None, past, after)
++            return after
++
++        def build_recorded(*args, **kwargs):
++            cache = build(*args, **kwargs)
++            recorder.caches.append(cache)
++            if recorder.on_build is not None:
++                recorder.on_build(cache)
++            if hasattr(cache, "prepare_turn"):
++                prepare = cache.prepare_turn
++
++                def prepare_recorded(past, num_of_token=None):
++                    after = prepare(past, num_of_token)
++                    note("prepare", cache, num_of_token, past, after)
++                    return after
++
++                cache.prepare_turn = prepare_recorded
++            return cache
++
++        module.apply_cache, module.finalize_turn_cache, module.build_cache = (
++            apply_recorded, finalize_recorded, build_recorded)
++
++        from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
++        self._model_class = LlavaLlamaForCausalLM
++        self._forward = LlavaLlamaForCausalLM.forward
++
++        def counting_forward(model, *args, **kwargs):
++            recorder.forwards += 1
++            return recorder._forward(model, *args, **kwargs)
++
++        LlavaLlamaForCausalLM.forward = counting_forward
++        return self
++
++    def __exit__(self, *exc):
++        module = self.module
++        module.apply_cache, module.finalize_turn_cache, module.build_cache = self._saved
++        self._model_class.forward = self._forward
++        return False
++
++
++def set_threads():
++    torch.set_num_threads(int(os.environ.get("THREADS", 2)))
+diff --git a/seedkv/make_standin.py b/seedkv/make_standin.py
+new file mode 100644
+index 0000000..7de9b37
+--- /dev/null
++++ b/seedkv/make_standin.py
+@@ -0,0 +1,484 @@
++"""
++Build a small LLaVA-architecture model that really reads its image (CPU, minutes).
++
++LLaVA-1.5 weights are not always reachable from a test machine.  This script
++makes a stand-in that goes through the SAME code as LLaVA in this repo
++(llava.model.builder, LlavaLlamaForCausalLM, the llava_v1 conversation
++template, the unchanged evaluators) and is trained from scratch on synthetic
++multi-turn visual question answering:
++
++  * image: 12 x 12 patches; six objects, each a 2 x 2 block of patches that
++    encodes a shape, a colour and a mark colour, on a noisy grey background;
++  * training aids, without which a model this small does not learn to read the
++    image in the steps a CPU allows: scenes with one to four objects, a
++    per-patch word loss (patch_words) and an attention guide on one head in
++    each of two layers;
++  * turns: "what color is the star ?", "what mark does the ring have ?",
++    "which shape is red ?", "describe the image .", "and the moon ?" (ellipsis:
++    needs the previous turn), "what did you say about the star ?" (needs an
++    earlier answer).
++
++Three evaluation sets separate what a cache policy has to do:
++
++  eval_shift.json   every later turn asks about an object no earlier turn touched
++  eval_same.json    every later turn asks about the Turn-1 object again
++  eval_mixed.json   the training mix (also contains "describe the image .")
++
++Usage:
++    python seedkv/make_standin.py --out /path/standin --steps 4000
++"""
++import argparse
++import json
++import math
++import os
++import random
++import sys
++import time
++
++import numpy as np
++import torch
++from PIL import Image
++
++REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, REPO)
++
++GRID, CELL = 12, 8
++SIZE = GRID * CELL
++N_OBJECTS = 6
++SHAPES = ["circle", "square", "star", "cross", "ring", "wave", "arrow", "moon"]
++COLORS = {
++    "red": (220, 40, 40), "green": (40, 180, 60), "blue": (50, 80, 230), "yellow": (240, 220, 40),
++    "purple": (150, 50, 200), "orange": (250, 140, 30), "cyan": (40, 210, 220), "white": (245, 245, 245),
++}
++MARKS = {"gold": (255, 200, 0), "silver": (170, 170, 190), "brown": (140, 80, 30), "pink": (255, 105, 180)}
++SYSTEM_MEAN = 0.5
++
++
++def object_patch(shape, color, mark):
++    """One 8 x 8 patch of an object.
++
++    Top half: eight 2 x 2 cells, the cell of this shape is lit in the mark colour.
++    Bottom half: eight 2 x 2 cells, the cell of this colour is lit in that colour.
++    The attributes are therefore linearly readable from the pixels, which lets a
++    small model learn the lookup quickly.
++    """
++    patch = np.full((CELL, CELL, 3), 20, np.int16)
++    s = SHAPES.index(shape)
++    patch[2 * (s // 4): 2 * (s // 4) + 2, 2 * (s % 4): 2 * (s % 4) + 2] = MARKS[mark]
++    c = list(COLORS).index(color)
++    patch[4 + 2 * (c // 4): 6 + 2 * (c // 4), 2 * (c % 4): 2 * (c % 4) + 2] = COLORS[color]
++    return patch
++
++
++# ----------------------------------------------------------------------
++# Scenes and conversations
++# ----------------------------------------------------------------------
++def sample_scene(rng, n_objects=N_OBJECTS):
++    shapes = rng.sample(SHAPES, n_objects)
++    colors = rng.sample(list(COLORS), n_objects)
++    slots = rng.sample(range((GRID // 2) ** 2), n_objects)
++    objects = []
++    for shape, color, slot in zip(shapes, colors, sorted(slots)):
++        objects.append({
++            "shape": shape, "color": color, "mark": rng.choice(list(MARKS)),
++            "row": 2 * (slot // (GRID // 2)), "col": 2 * (slot % (GRID // 2)),
++        })
++    return {"objects": objects, "noise_seed": rng.randrange(2 ** 31)}
++
++
++def render(scene):
++    """uint8 [SIZE, SIZE, 3]."""
++    noise = np.random.RandomState(scene["noise_seed"])
++    image = np.full((SIZE, SIZE, 3), 128, np.int16)
++    for obj in scene["objects"]:
++        patch = object_patch(obj["shape"], obj["color"], obj["mark"])
++        for dr in range(2):
++            for dc in range(2):
++                r0, c0 = (obj["row"] + dr) * CELL, (obj["col"] + dc) * CELL
++                image[r0:r0 + CELL, c0:c0 + CELL] = patch
++    image = image + noise.randint(-8, 9, image.shape)
++    return np.clip(image, 0, 255).astype(np.uint8)
++
++
++def ask(kind, obj):
++    if kind == "color":
++        return f"what color is the {obj['shape']} ?", f"the {obj['shape']} is {obj['color']} ."
++    if kind == "mark":
++        return f"what mark does the {obj['shape']} have ?", f"the {obj['shape']} has a {obj['mark']} mark ."
++    if kind == "which":
++        return f"which shape is {obj['color']} ?", f"the {obj['color']} one is the {obj['shape']} ."
++    raise ValueError(kind)
++
++
++def describe(scene):
++    parts = [f"a {o['color']} {o['shape']}" for o in scene["objects"]]
++    return "describe the image .", "there is " + " , ".join(parts) + " ."
++
++
++def make_conversation(rng, mode="mixed", n_turns=4, n_objects=N_OBJECTS):
++    scene = sample_scene(rng, n_objects)
++    objects = scene["objects"]
++    turns, touched, said, last_attr = [], [], {}, None
++
++    def add(question, answer, focus, obj=None, attr=None):
++        turn = {"question": question, "answer": answer, "focus": focus}
++        if obj is not None:
++            # the word the image has to supply, and where the object is
++            turn["key"] = obj["shape"] if attr == "which" else obj[attr]
++            turn["ident"] = obj["color"] if attr == "which" else obj["shape"]   # names the object
++            turn["target"] = [obj["row"], obj["col"]]
++        turns.append(turn)
++        if obj is not None and obj not in touched:
++            touched.append(obj)
++        if obj is not None and attr in ("color", "mark"):
++            said[obj["shape"]] = (attr, answer)
++
++    def fresh():
++        pool = [o for o in objects if o not in touched]
++        return rng.choice(pool) if pool else None
++
++    # Turn 1
++    if mode == "mixed" and rng.random() < 0.25:
++        add(*describe(scene), focus="describe")
++    else:
++        kinds = ["color", "mark"] if mode == "same" else ["color", "mark", "which"]
++        kind = rng.choice(kinds)
++        obj = rng.choice(objects)
++        add(*ask(kind, obj), focus="first", obj=obj, attr=kind)
++        last_attr = kind if kind in ("color", "mark") else None
++
++    while len(turns) < n_turns:
++        if mode == "shift":
++            choice = rng.choice(["new", "new", "followup"])
++        elif mode == "same":
++            choice = rng.choice(["same", "same", "recall"])
++        else:
++            choice = rng.choices(["new", "followup", "same", "recall"], [0.45, 0.2, 0.2, 0.15])[0]
++
++        if choice == "followup" and last_attr is not None and fresh() is not None:
++            obj = fresh()
++            _, answer = ask(last_attr, obj)
++            add(f"and the {obj['shape']} ?", answer, focus="new", obj=obj, attr=last_attr)
++        elif choice == "recall" and said:
++            shape = rng.choice(list(said))
++            _, answer = said[shape]
++            add(f"what did you say about the {shape} ?", "i said " + answer, focus="recall")
++            last_attr = None
++        elif choice == "same" and touched:
++            obj = rng.choice(touched) if mode != "same" else touched[0]
++            kind = rng.choice(["color", "mark", "which"])
++            add(*ask(kind, obj), focus="same", obj=obj, attr=kind)
++            last_attr = kind if kind in ("color", "mark") else None
++        else:
++            obj = fresh() or rng.choice(objects)
++            kind = rng.choice(["color", "mark", "which"])
++            add(*ask(kind, obj), focus="new" if obj not in touched else "same", obj=obj, attr=kind)
++            last_attr = kind if kind in ("color", "mark") else None
++    return scene, turns
++
++
++# ----------------------------------------------------------------------
++# Rendering a conversation exactly as the evaluators do
++# ----------------------------------------------------------------------
++def word_id(word, tokenizer):
++    if word not in _WORD_IDS:
++        _WORD_IDS[word] = tokenizer(word, add_special_tokens=False).input_ids[0]
++    return _WORD_IDS[word]
++
++
++def encode(turns, tokenizer, lookups=None):
++    """input ids (one image placeholder) and labels (answers + </s> only).
++
++    lookups, if a list, receives (index of the key word, index of the word that
++    names the object, patch indices of the object) for every turn that reads an
++    object from the image.
++    """
++    from llava.constants import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX
++    from llava.conversation import conv_templates
++    from llava.mm_utils import tokenizer_image_token
++
++    conv = conv_templates["llava_v1"].copy()
++    ids, labels = [], []
++    for index, turn in enumerate(turns):
++        question = turn["question"] + ("\n" + DEFAULT_IMAGE_TOKEN if index == 0 else "")
++        conv.append_message(conv.roles[0], question)
++        conv.append_message(conv.roles[1], None)
++        base = tokenizer_image_token(conv.get_prompt(), tokenizer, IMAGE_TOKEN_INDEX)
++        conv.messages[-1][-1] = turn["answer"]
++        full = tokenizer_image_token(conv.get_prompt(), tokenizer, IMAGE_TOKEN_INDEX)
++        assert full[: len(base)] == base and base[: len(ids)] == ids, "tokenization is not prefix-stable"
++        labels += [IGNORE_INDEX] * (len(base) - len(ids)) + full[len(base):]
++        if lookups is not None and "target" in turn:
++            row, col = turn["target"]
++            cells = [(row + dr) * GRID + col + dc for dr in range(2) for dc in range(2)]
++            answer = full[len(base):]
++            lookups.append((len(base) + answer.index(word_id(turn["key"], tokenizer)),
++                            len(base) + answer.index(word_id(turn["ident"], tokenizer)), cells))
++        ids = full
++    return ids, labels
++
++
++def to_pixels(image):
++    """uint8 [S, S, 3] -> normalised float [3, S, S] (the stand-in's image processor)."""
++    x = torch.from_numpy(image).float().div(255.0)
++    return ((x - SYSTEM_MEAN) / 0.5).permute(2, 0, 1).contiguous()
++
++
++def batch(rng, tokenizer, size, mode="mixed", curriculum=False):
++    """curriculum: scenes with fewer objects too, which lets the model learn to read
++    a patch before it has to find the right one (evaluation always uses six)."""
++    from llava.constants import IGNORE_INDEX
++    rows, images, patches, lookups = [], [], [], []
++    for _ in range(size):
++        n_objects = rng.choice([1, 2, 3, 4, N_OBJECTS, N_OBJECTS]) if curriculum else N_OBJECTS
++        scene, turns = make_conversation(rng, mode, n_turns=rng.choice([3, 4]), n_objects=n_objects)
++        lookups.append([])
++        rows.append(encode(turns, tokenizer, lookups[-1]))
++        images.append(to_pixels(render(scene)))
++        patches.append(patch_words(scene, tokenizer, rng))
++    width = max(len(ids) for ids, _ in rows)
++    input_ids = torch.zeros(size, width, dtype=torch.long)
++    labels = torch.full((size, width), IGNORE_INDEX, dtype=torch.long)
++    mask = torch.zeros(size, width, dtype=torch.bool)
++    for i, (ids, lab) in enumerate(rows):
++        input_ids[i, : len(ids)] = torch.tensor(ids)
++        labels[i, : len(lab)] = torch.tensor(lab)
++        mask[i, : len(ids)] = True
++    return input_ids, labels, mask, torch.stack(images), torch.stack(patches), lookups
++
++
++_WORD_IDS = {}
++
++
++def patch_words(scene, tokenizer, rng):
++    """For every image patch of an object, the token of one of its attributes (else -100).
++
++    Used only as an auxiliary training target at the image positions, so that a
++    patch's representation spells out what it shows (as LLaVA's image tokens do
++    under the logit lens).  Without it this small model does not learn to read
++    the image in the steps a CPU allows.
++    """
++    target = torch.full((GRID * GRID,), -100, dtype=torch.long)
++    for obj in scene["objects"]:
++        word = word_id(obj[rng.choice(["shape", "color", "mark"])], tokenizer)
++        for dr in range(2):
++            for dc in range(2):
++                target[(obj["row"] + dr) * GRID + obj["col"] + dc] = word
++    return target
++
++
++# ----------------------------------------------------------------------
++# Tokenizer, vision tower, model
++# ----------------------------------------------------------------------
++def build_tokenizer(out_dir, rng):
++    import sentencepiece as spm
++    from transformers import AutoTokenizer, LlamaTokenizer
++    from llava.conversation import conv_templates
++
++    corpus = os.path.join(out_dir, "corpus.txt")
++    with open(corpus, "w") as handle:
++        for _ in range(4000):
++            _, turns = make_conversation(rng, "mixed")
++            conv = conv_templates["llava_v1"].copy()
++            for turn in turns:
++                conv.append_message(conv.roles[0], turn["question"])
++                conv.append_message(conv.roles[1], turn["answer"])
++            for line in conv.get_prompt().replace("</s>", "\n").split("\n"):
++                if line.strip():
++                    handle.write(line.strip() + "\n")
++    prefix = os.path.join(out_dir, "spm")
++    spm.SentencePieceTrainer.train(
++        input=corpus, model_prefix=prefix, vocab_size=256, model_type="bpe",
++        character_coverage=1.0, normalization_rule_name="identity", hard_vocab_limit=False,
++        unk_id=0, bos_id=1, eos_id=2, pad_id=-1, user_defined_symbols=["\n"],
++    )
++    # Save and reload: only the reloaded tokenizer treats "</s>" as one special
++    # token, and that is the tokenizer the evaluators will use.
++    path = os.path.join(out_dir, "tokenizer")
++    LlamaTokenizer(vocab_file=prefix + ".model", legacy=True).save_pretrained(path)
++    tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
++    assert tokenizer("a .</s>USER", add_special_tokens=False).input_ids.count(tokenizer.eos_token_id) == 1
++    return tokenizer
++
++
++def build_vision_tower(path, seed):
++    from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
++    torch.manual_seed(seed)
++    config = CLIPVisionConfig(
++        hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2,
++        image_size=SIZE, patch_size=CELL, projection_dim=32,
++    )
++    CLIPVisionModel(config).save_pretrained(path)
++    CLIPImageProcessor(
++        size={"shortest_edge": SIZE}, crop_size={"height": SIZE, "width": SIZE},
++        do_resize=True, do_center_crop=True, do_normalize=True, do_convert_rgb=True,
++        image_mean=[SYSTEM_MEAN] * 3, image_std=[0.5] * 3,
++    ).save_pretrained(path)
++
++
++def build_model(tokenizer, clip_path, args):
++    from llava.model.language_model.llava_llama import LlavaConfig, LlavaLlamaForCausalLM
++    torch.manual_seed(args.seed)
++    config = LlavaConfig(
++        vocab_size=len(tokenizer), hidden_size=args.hidden, intermediate_size=3 * args.hidden,
++        num_hidden_layers=args.layers, num_attention_heads=args.heads, max_position_embeddings=2048,
++        bos_token_id=1, eos_token_id=2, pad_token_id=0,
++        mm_vision_tower=os.path.abspath(clip_path), mm_hidden_size=32, mm_projector_type="mlp2x_gelu",
++        mm_vision_select_layer=-2, mm_vision_select_feature="patch",
++        mm_use_im_start_end=False, mm_use_im_patch_token=False,
++    )
++    model = LlavaLlamaForCausalLM(config)
++    model.get_vision_tower().load_model()
++    return model
++
++
++@torch.no_grad()
++def exact_match(model, tokenizer, rng, mode, size=48):
++    """Share of answers whose every token is predicted correctly (teacher forcing)."""
++    from llava.constants import IGNORE_INDEX
++    model.eval()
++    input_ids, labels, mask, images, _, _ = batch(rng, tokenizer, size, mode)
++    logits = model(input_ids=input_ids, attention_mask=mask, images=images).logits
++    n_image = logits.shape[1] - input_ids.shape[1]
++    hits, total = 0, 0
++    for i in range(size):
++        row = labels[i]
++        image_at = int((input_ids[i] == -200).nonzero()[0])
++        positions = (row != IGNORE_INDEX).nonzero().flatten().tolist()
++        ok, previous = True, None
++        for p in positions + [None]:
++            if previous is not None and (p is None or p != previous + 1):
++                hits += int(ok)
++                total += 1
++                ok = True
++            if p is not None:
++                shifted = p + n_image if p > image_at else p
++                ok &= int(logits[i, shifted - 1].argmax()) == int(row[p])
++            previous = p
++    model.train()
++    return hits / max(1, total)
++
++
++def train(model, tokenizer, args):
++    rng = random.Random(args.seed + 1)
++    val_rng_seed = args.seed + 2
++    params = [p for name, p in model.named_parameters() if "vision_tower" not in name]
++    for name, p in model.named_parameters():
++        p.requires_grad = "vision_tower" not in name
++    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01, betas=(0.9, 0.98))
++    model.train()
++    start, best = time.time(), 0.0
++    for step in range(1, args.steps + 1):
++        warm = min(1.0, step / 200)
++        decay = 0.5 * (1 + math.cos(math.pi * step / args.steps))
++        for group in optimizer.param_groups:
++            group["lr"] = args.lr * warm * (0.1 + 0.9 * decay)
++        input_ids, labels, mask, images, patches, lookups = batch(
++            rng, tokenizer, args.batch_size, curriculum=True)
++        out = model(input_ids=input_ids, attention_mask=mask, labels=labels, images=images,
++                    output_attentions=True)
++        image_at = (input_ids == -200).long().argmax(dim=1)                       # [B]
++        index = image_at[:, None] + torch.arange(GRID * GRID)[None, :]            # [B, patches]
++        patch_logits = out.logits.gather(1, index[:, :, None].expand(-1, -1, out.logits.shape[-1]))
++        aux = torch.nn.functional.cross_entropy(
++            patch_logits.reshape(-1, patch_logits.shape[-1]), patches.reshape(-1), ignore_index=-100)
++        # Attention guide for the two hops of the lookup, on ONE head each: at the
++        # position that must produce the attribute, (1) a head of an early layer
++        # is pointed at the word naming the object, (2) a head of a later layer at
++        # the object's patches.  This only breaks the start-up plateau; every
++        # other head and layer is free.
++        guide = out.logits.new_zeros(())
++        first = out.attentions[args.guide_layer - 2][:, 0]                        # [B, T, T]
++        second = out.attentions[args.guide_layer][:, 0]
++        shift = GRID * GRID - 1                                                   # image placeholder -> patches
++        count = 0
++        for row, items in enumerate(lookups):
++            for position, ident, cells in items:
++                query = position + shift - 1
++                columns = torch.tensor(cells) + int(image_at[row])
++                guide = guide - torch.log(second[row, query, columns].sum() + 1e-6)
++                guide = guide - torch.log(first[row, query, ident + shift] + 1e-6)
++                count += 1
++        guide = guide / max(1, count)
++        loss = out.loss + args.aux_weight * aux + args.guide_weight * guide
++        optimizer.zero_grad(set_to_none=True)
++        loss.backward()
++        torch.nn.utils.clip_grad_norm_(params, 1.0)
++        optimizer.step()
++        if step % args.log_every == 0 or step == args.steps:
++            scores = {m: exact_match(model, tokenizer, random.Random(val_rng_seed), m) for m in ("mixed", "shift", "same")}
++            best = max(best, scores["mixed"])
++            print(f"step {step:5d}  loss {out.loss.item():.4f}  patch-loss {aux.item():.3f}  "
++                  f"guide {guide.item():.3f}  exact-match "
++                  + "  ".join(f"{m} {v:.3f}" for m, v in scores.items())
++                  + f"  ({time.time() - start:.0f}s)", flush=True)
++            if min(scores["shift"], scores["same"]) >= args.stop_at:
++                break
++    return best
++
++
++def write_eval_sets(out_dir, args):
++    image_dir = os.path.join(out_dir, "data", "images")
++    os.makedirs(image_dir, exist_ok=True)
++    for mode in ("shift", "same", "mixed"):
++        rng = random.Random(f"{args.seed}-{mode}")
++        items = []
++        for index in range(args.eval_items):
++            scene, turns = make_conversation(rng, mode, n_turns=4)
++            name = f"{mode}_{index:04d}.png"
++            Image.fromarray(render(scene)).save(os.path.join(image_dir, name))
++            items.append({"image": name, "turns": turns, "objects": scene["objects"]})
++        with open(os.path.join(out_dir, "data", f"eval_{mode}.json"), "w") as handle:
++            json.dump(items, handle, indent=1)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--out", required=True)
++    parser.add_argument("--steps", type=int, default=4000)
++    parser.add_argument("--batch-size", type=int, default=16)
++    parser.add_argument("--lr", type=float, default=2e-3)
++    parser.add_argument("--hidden", type=int, default=128)
++    parser.add_argument("--layers", type=int, default=8)
++    parser.add_argument("--heads", type=int, default=4)
++    parser.add_argument("--eval-items", type=int, default=150)
++    parser.add_argument("--log-every", type=int, default=250)
++    parser.add_argument("--stop-at", type=float, default=0.985)
++    parser.add_argument("--guide-weight", type=float, default=0.5,
++                        help="weight of the attention guide (training aid, one head in two layers)")
++    parser.add_argument("--guide-layer", type=int, default=3)
++    parser.add_argument("--aux-weight", type=float, default=0.5,
++                        help="weight of the per-patch word loss (training aid, see patch_words)")
++    parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--threads", type=int, default=2)
++    args = parser.parse_args()
++    torch.set_num_threads(args.threads)
++
++    os.makedirs(args.out, exist_ok=True)
++    clip_path = os.path.join(args.out, "clip-tiny")
++    model_path = os.path.join(args.out, "llava-v1-standin")
++    tokenizer = build_tokenizer(args.out, random.Random(args.seed))
++    build_vision_tower(clip_path, args.seed)
++    model = build_model(tokenizer, clip_path, args)
++    count = sum(p.numel() for name, p in model.named_parameters() if "vision_tower" not in name)
++    print(f"stand-in: {args.layers} layers, hidden {args.hidden}, {args.heads} heads, "
++          f"{count / 1e6:.2f}M trainable parameters, vocab {len(tokenizer)}", flush=True)
++
++    # The training pixels must be what the evaluators' image processor produces.
++    from llava.mm_utils import process_images
++    scene, _ = make_conversation(random.Random(1))
++    processor = model.get_vision_tower().image_processor
++    reference = process_images([Image.fromarray(render(scene))], processor,
++                               argparse.Namespace(image_aspect_ratio="pad"))[0]
++    assert torch.allclose(reference, to_pixels(render(scene)), atol=1e-5), "image processing mismatch"
++
++    best = train(model, tokenizer, args)
++    model.eval()
++    model.save_pretrained(model_path)
++    tokenizer.save_pretrained(model_path)
++    write_eval_sets(args.out, args)
++    print(f"saved {model_path} (best mixed exact-match {best:.3f}) and {args.out}/data", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/seedkv/run_compare.py b/seedkv/run_compare.py
+new file mode 100644
+index 0000000..3f3ad22
+--- /dev/null
++++ b/seedkv/run_compare.py
+@@ -0,0 +1,112 @@
++"""
++Compare cache methods on the stand-in (or any LLaVA checkpoint) through the
++unchanged evaluators, on CPU.
++
++    python seedkv/run_compare.py --standin /path/standin --metric ppl \
++        --methods full pyramidkv seedkv --ratios 0.9 0.8 --splits shift same mixed \
++        --samples 100 --out results_ppl.json
++
++``--metric ppl`` runs eval_ppl_final.py (perplexity of the reference answers).
++``--metric gen`` runs eval_rouge_final2.py (greedy generation) and also reports
++the share of answers that equal the reference exactly.
++
++Results are appended to --out after every run, and finished runs are skipped,
++so an interrupted sweep can be restarted.
++"""
++import argparse
++import json
++import os
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++
++import harness  # noqa: E402
++
++# name -> (evaluator --method, extra arguments)
++METHODS = {
++    "full": ("local_cache", []),            # run at ratio 0: nothing is evicted
++    "local_cache": ("local_cache", []),
++    "h2o": ("h2o", []),
++    "elastic_cache": ("elastic_cache", []),
++    "tgv_kv": ("tgv_kv", []),
++    "meda": ("meda", []),
++    "pyramidkv": ("pyramidkv", []),
++    "atlaskv": ("atlaskv", []),
++    "turncast_kv": ("turncast_kv", []),     # needs --turncast-scorer (see --scorer)
++    "turn_conditioned_layerwise_merge": ("turn_conditioned_layerwise_merge", []),
++    "turn_conditioned_layerwise_eviction": ("turn_conditioned_layerwise_eviction", []),
++    "turn_conditioned_coverage": ("turn_conditioned_coverage", []),
++    "seedkv": ("seedkv", []),
++    "seedkv_nocharge": ("seedkv", ["--seedkv-no-seed-charge"]),
++    "seedkv_uniform": ("seedkv", ["--seedkv-allocation", "uniform"]),
++    "seedkv_w16": ("seedkv", ["--seedkv-window-size", "16"]),
++    "seedkv_refresh": ("seedkv", ["--seedkv-refresh-every", "16"]),
++    "seedkv_refresh8": ("seedkv", ["--seedkv-refresh-every", "8"]),
++    # Same entries per layer as this repo's PyramidKVCache (which holds more than L * C).
++    "seedkv_as_pyramidkv": ("seedkv", ["--seedkv-allocation", "pyramidkv"]),
++    "seedkv_retain_only_as_pyramidkv": ("seedkv", ["--seedkv-allocation", "pyramidkv", "--seedkv-no-regenerate"]),
++    # Ablation: SeedKV's code, scoring and exact budgets with regeneration off.
++    "seedkv_retain_only": ("seedkv", ["--seedkv-no-regenerate"]),
++}
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--standin", required=True)
++    parser.add_argument("--metric", choices=["ppl", "gen"], default="ppl")
++    parser.add_argument("--methods", nargs="+", default=["full", "pyramidkv", "seedkv"])
++    parser.add_argument("--ratios", nargs="+", default=["0.9"])
++    parser.add_argument("--splits", nargs="+", default=["shift", "same", "mixed"])
++    parser.add_argument("--samples", type=int, default=100)
++    parser.add_argument("--max-tokens", type=int, default=40)
++    parser.add_argument("--scorer", default=None, help="TurnCast-KV scorer trained for this model")
++    parser.add_argument("--out", required=True)
++    parser.add_argument("--work", default=None)
++    args = parser.parse_args()
++    harness.set_threads()
++    work = args.work or os.path.splitext(args.out)[0] + "_runs"
++    os.makedirs(work, exist_ok=True)
++
++    results = {}
++    if os.path.exists(args.out):
++        with open(args.out) as handle:
++            results = json.load(handle)
++
++    for split in args.splits:
++        for name in args.methods:
++            method, extra = METHODS[name]
++            extra = list(extra)
++            if method == "turncast_kv":
++                if not args.scorer:
++                    print(f"skip {name}: no --scorer")
++                    continue
++                extra += ["--turncast-scorer", args.scorer]
++            for ratio in (["0.0"] if name == "full" else args.ratios):
++                key = f"{args.metric}|{split}|{name}|{ratio}"
++                if key in results:
++                    continue
++                run_name = key.replace("|", "_")
++                start = time.time()
++                try:
++                    if args.metric == "ppl":
++                        out = harness.run_ppl(args.standin, split, method, ratio, args.samples, work, run_name, extra)
++                        row = {"ppl": out["overall_ppl"], "per_turn": out["per_turn_ppl"]}
++                    else:
++                        out = harness.run_rouge(args.standin, split, method, ratio, args.samples, work, run_name,
++                                                extra, max_tokens=args.max_tokens)
++                        accuracy, per_turn = harness.exact_match(out)
++                        row = {"exact": accuracy, "exact_per_turn": per_turn,
++                               "rouge": out["avg_rouge_l_f"], "rouge_per_turn": out["per_turn_rouge_l_f"]}
++                except Exception as exc:  # a baseline that cannot run on this model
++                    row = {"error": f"{type(exc).__name__}: {exc}"[:300]}
++                row["seconds"] = round(time.time() - start, 1)
++                results[key] = row
++                with open(args.out, "w") as handle:
++                    json.dump(results, handle, indent=1)
++                print(key, json.dumps(row), flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/seedkv/standin_results.json b/seedkv/standin_results.json
+new file mode 100644
+index 0000000..b62c608
+--- /dev/null
++++ b/seedkv/standin_results.json
+@@ -0,0 +1,1805 @@
++{
++ "gen|mixed|full|0.0": {
++  "exact": 0.935,
++  "exact_per_turn": {
++   "1": 0.76,
++   "2": 1.0,
++   "3": 1.0,
++   "4": 0.98
++  },
++  "rouge": 0.9870332462328348,
++  "rouge_per_turn": {
++   "1": 0.9540853808827111,
++   "2": 0.9999999949999995,
++   "3": 0.9999999949999995,
++   "4": 0.9940476140486391
++  },
++  "seconds": 22.1
++ },
++ "gen|mixed|pyramidkv|0.8": {
++  "exact": 0.5925,
++  "exact_per_turn": {
++   "1": 0.43,
++   "2": 0.71,
++   "3": 0.65,
++   "4": 0.58
++  },
++  "rouge": 0.9099937533668704,
++  "rouge_per_turn": {
++   "1": 0.852240901480704,
++   "2": 0.9426666616666661,
++   "3": 0.9346388838895057,
++   "4": 0.9104285664306119
++  },
++  "seconds": 22.2
++ },
++ "gen|mixed|pyramidkv|0.9": {
++  "exact": 0.385,
++  "exact_per_turn": {
++   "1": 0.35,
++   "2": 0.53,
++   "3": 0.32,
++   "4": 0.34
++  },
++  "rouge": 0.8641801081849247,
++  "rouge_per_turn": {
++   "1": 0.8212363207490665,
++   "2": 0.9066666616666662,
++   "3": 0.8674444394456787,
++   "4": 0.8613730108782911
++  },
++  "seconds": 20.8
++ },
++ "gen|mixed|pyramidkv|0.95": {
++  "exact": 0.1425,
++  "exact_per_turn": {
++   "1": 0.01,
++   "2": 0.24,
++   "3": 0.12,
++   "4": 0.2
++  },
++  "rouge": 0.7232384510974442,
++  "rouge_per_turn": {
++   "1": 0.43781889872554003,
++   "2": 0.8127499950159998,
++   "3": 0.8162142807193061,
++   "4": 0.8261706299289309
++  },
++  "seconds": 20.0
++ },
++ "gen|mixed|seedkv_as_pyramidkv|0.9": {
++  "exact": 0.525,
++  "exact_per_turn": {
++   "1": 0.2,
++   "2": 0.62,
++   "3": 0.63,
++   "4": 0.65
++  },
++  "rouge": 0.829074986441664,
++  "rouge_per_turn": {
++   "1": 0.7215420241641329,
++   "2": 0.8547499950339998,
++   "3": 0.8696309474118249,
++   "4": 0.8703769791567036
++  },
++  "seconds": 24.6
++ },
++ "gen|mixed|seedkv_refresh8|0.9": {
++  "exact": 0.5175,
++  "exact_per_turn": {
++   "1": 0.22,
++   "2": 0.6,
++   "3": 0.62,
++   "4": 0.63
++  },
++  "rouge": 0.8351095851591473,
++  "rouge_per_turn": {
++   "1": 0.7404762065851483,
++   "2": 0.8670833283593331,
++   "3": 0.8678232551067953,
++   "4": 0.865055550585316
++  },
++  "seconds": 26.8
++ },
++ "gen|mixed|seedkv_retain_only_as_pyramidkv|0.9": {
++  "exact": 0.3625,
++  "exact_per_turn": {
++   "1": 0.34,
++   "2": 0.49,
++   "3": 0.33,
++   "4": 0.29
++  },
++  "rouge": 0.8588542127877028,
++  "rouge_per_turn": {
++   "1": 0.8143216280478335,
++   "2": 0.8998888838895057,
++   "3": 0.8678888838895058,
++   "4": 0.8533174553239702
++  },
++  "seconds": 19.7
++ },
++ "gen|mixed|seedkv_retain_only|0.9": {
++  "exact": 0.3625,
++  "exact_per_turn": {
++   "1": 0.28,
++   "2": 0.5,
++   "3": 0.31,
++   "4": 0.36
++  },
++  "rouge": 0.8489607743552048,
++  "rouge_per_turn": {
++   "1": 0.7646446997148789,
++   "2": 0.8969999950019996,
++   "3": 0.8619365029381454,
++   "4": 0.8722618997657974
++  },
++  "seconds": 20.8
++ },
++ "gen|mixed|seedkv|0.8": {
++  "exact": 0.7475,
++  "exact_per_turn": {
++   "1": 0.43,
++   "2": 0.92,
++   "3": 0.83,
++   "4": 0.81
++  },
++  "rouge": 0.9116376781843394,
++  "rouge_per_turn": {
++   "1": 0.8255864419769189,
++   "2": 0.9697499950079996,
++   "3": 0.9299285664466121,
++   "4": 0.9212857093058366
++  },
++  "seconds": 26.2
++ },
++ "gen|mixed|seedkv|0.9": {
++  "exact": 0.5125,
++  "exact_per_turn": {
++   "1": 0.22,
++   "2": 0.55,
++   "3": 0.61,
++   "4": 0.67
++  },
++  "rouge": 0.8263358560068313,
++  "rouge_per_turn": {
++   "1": 0.7299188357541351,
++   "2": 0.8372499950359997,
++   "3": 0.8636309474138248,
++   "4": 0.8745436458233704
++  },
++  "seconds": 25.3
++ },
++ "gen|mixed|seedkv|0.95": {
++  "exact": 0.2775,
++  "exact_per_turn": {
++   "1": 0.02,
++   "2": 0.33,
++   "3": 0.34,
++   "4": 0.42
++  },
++  "rouge": 0.680199309727191,
++  "rouge_per_turn": {
++   "1": 0.4246594471138699,
++   "2": 0.7342142807773062,
++   "3": 0.746740976300711,
++   "4": 0.8151825347168767
++  },
++  "seconds": 25.1
++ },
++ "gen|mixed|turn_conditioned_coverage|0.9": {
++  "exact": 0.6275,
++  "exact_per_turn": {
++   "1": 0.42,
++   "2": 0.74,
++   "3": 0.64,
++   "4": 0.71
++  },
++  "rouge": 0.9083591903016892,
++  "rouge_per_turn": {
++   "1": 0.8347454119851918,
++   "2": 0.934087907102396,
++   "3": 0.9263624658703885,
++   "4": 0.9382409762487844
++  },
++  "seconds": 31.1
++ },
++ "gen|mixed|turncast_kv|0.9": {
++  "exact": 0.6875,
++  "exact_per_turn": {
++   "1": 0.59,
++   "2": 0.83,
++   "3": 0.67,
++   "4": 0.66
++  },
++  "rouge": 0.9338121892454546,
++  "rouge_per_turn": {
++   "1": 0.9043479783226693,
++   "2": 0.9654999949999994,
++   "3": 0.9336944394476785,
++   "4": 0.9317063442114761
++  },
++  "seconds": 23.8
++ },
++ "gen|same|full|0.0": {
++  "exact": 0.975,
++  "exact_per_turn": {
++   "1": 0.99,
++   "2": 0.99,
++   "3": 0.98,
++   "4": 0.94
++  },
++  "rouge": 0.9916845188112963,
++  "rouge_per_turn": {
++   "1": 0.9983333283333329,
++   "2": 0.9987499949999994,
++   "3": 0.9923333283353328,
++   "4": 0.9773214235765302
++  },
++  "seconds": 22.2
++ },
++ "gen|same|pyramidkv|0.8": {
++  "exact": 0.7525,
++  "exact_per_turn": {
++   "1": 0.77,
++   "2": 0.72,
++   "3": 0.78,
++   "4": 0.74
++  },
++  "rouge": 0.9503214235729562,
++  "rouge_per_turn": {
++   "1": 0.9499999949999999,
++   "2": 0.9546666616666661,
++   "3": 0.956749995,
++   "4": 0.9398690426251699
++  },
++  "seconds": 21.5
++ },
++ "gen|same|pyramidkv|0.9": {
++  "exact": 0.535,
++  "exact_per_turn": {
++   "1": 0.54,
++   "2": 0.54,
++   "3": 0.53,
++   "4": 0.53
++  },
++  "rouge": 0.9077341219850341,
++  "rouge_per_turn": {
++   "1": 0.8889999950020004,
++   "2": 0.9198888838895055,
++   "3": 0.9101666616666663,
++   "4": 0.9118809473819725
++  },
++  "seconds": 21.4
++ },
++ "gen|same|pyramidkv|0.95": {
++  "exact": 0.205,
++  "exact_per_turn": {
++   "1": 0.05,
++   "2": 0.19,
++   "3": 0.29,
++   "4": 0.29
++  },
++  "rouge": 0.733176943085035,
++  "rouge_per_turn": {
++   "1": 0.4303030253998572,
++   "2": 0.7914365029595745,
++   "3": 0.852007931514676,
++   "4": 0.8589603124660371
++  },
++  "seconds": 20.6
++ },
++ "gen|same|seedkv_as_pyramidkv|0.9": {
++  "exact": 0.545,
++  "exact_per_turn": {
++   "1": 0.31,
++   "2": 0.66,
++   "3": 0.57,
++   "4": 0.64
++  },
++  "rouge": 0.8283293601174566,
++  "rouge_per_turn": {
++   "1": 0.7174999950600008,
++   "2": 0.8955317410525672,
++   "3": 0.8356071378963673,
++   "4": 0.8646785664608981
++  },
++  "seconds": 26.4
++ },
++ "gen|same|seedkv_refresh8|0.9": {
++  "exact": 0.5575,
++  "exact_per_turn": {
++   "1": 0.33,
++   "2": 0.66,
++   "3": 0.57,
++   "4": 0.67
++  },
++  "rouge": 0.8310704315462831,
++  "rouge_per_turn": {
++   "1": 0.7224999950600008,
++   "2": 0.9011150743839005,
++   "3": 0.8288571379003673,
++   "4": 0.8718095188408711
++  },
++  "seconds": 25.8
++ },
++ "gen|same|seedkv_retain_only_as_pyramidkv|0.9": {
++  "exact": 0.5325,
++  "exact_per_turn": {
++   "1": 0.55,
++   "2": 0.54,
++   "3": 0.54,
++   "4": 0.5
++  },
++  "rouge": 0.9044156696053471,
++  "rouge_per_turn": {
++   "1": 0.8846666616706671,
++   "2": 0.9176031696048118,
++   "3": 0.9103809473819724,
++   "4": 0.9050118997639452
++  },
++  "seconds": 21.1
++ },
++ "gen|same|seedkv_retain_only|0.9": {
++  "exact": 0.4725,
++  "exact_per_turn": {
++   "1": 0.43,
++   "2": 0.5,
++   "3": 0.48,
++   "4": 0.48
++  },
++  "rouge": 0.8753948362797997,
++  "rouge_per_turn": {
++   "1": 0.8084999950280004,
++   "2": 0.9006547569098635,
++   "3": 0.8945317410354242,
++   "4": 0.8978928521459182
++  },
++  "seconds": 21.1
++ },
++ "gen|same|seedkv|0.8": {
++  "exact": 0.76,
++  "exact_per_turn": {
++   "1": 0.71,
++   "2": 0.86,
++   "3": 0.75,
++   "4": 0.72
++  },
++  "rouge": 0.9234702331093477,
++  "rouge_per_turn": {
++   "1": 0.9341666616666666,
++   "2": 0.968916661670666,
++   "3": 0.8984642807404487,
++   "4": 0.8923333283596192
++  },
++  "seconds": 27.0
++ },
++ "gen|same|seedkv|0.9": {
++  "exact": 0.5675,
++  "exact_per_turn": {
++   "1": 0.33,
++   "2": 0.66,
++   "3": 0.59,
++   "4": 0.69
++  },
++  "rouge": 0.8366418601159566,
++  "rouge_per_turn": {
++   "1": 0.7224999950600008,
++   "2": 0.9011150743839005,
++   "3": 0.8408571378963673,
++   "4": 0.8820952331235649
++  },
++  "seconds": 26.0
++ },
++ "gen|same|seedkv|0.95": {
++  "exact": 0.3275,
++  "exact_per_turn": {
++   "1": 0.06,
++   "2": 0.33,
++   "3": 0.36,
++   "4": 0.56
++  },
++  "rouge": 0.6973464055942717,
++  "rouge_per_turn": {
++   "1": 0.4272626213616574,
++   "2": 0.7557698363249081,
++   "3": 0.7568452331515652,
++   "4": 0.8495079315389621
++  },
++  "seconds": 25.3
++ },
++ "gen|same|turn_conditioned_coverage|0.9": {
++  "exact": 0.6925,
++  "exact_per_turn": {
++   "1": 0.67,
++   "2": 0.7,
++   "3": 0.77,
++   "4": 0.63
++  },
++  "rouge": 0.9122258108840469,
++  "rouge_per_turn": {
++   "1": 0.9098751754067698,
++   "2": 0.911329360118429,
++   "3": 0.9398650743784366,
++   "4": 0.8878336336325661
++  },
++  "seconds": 29.4
++ },
++ "gen|same|turncast_kv|0.9": {
++  "exact": 0.935,
++  "exact_per_turn": {
++   "1": 0.97,
++   "2": 0.91,
++   "3": 0.94,
++   "4": 0.92
++  },
++  "rouge": 0.9878730108735765,
++  "rouge_per_turn": {
++   "1": 0.9924999949999994,
++   "2": 0.9845555505561724,
++   "3": 0.9900833283333331,
++   "4": 0.9843531696048119
++  },
++  "seconds": 23.5
++ },
++ "gen|shift|full|0.0": {
++  "exact": 0.995,
++  "exact_per_turn": {
++   "1": 1.0,
++   "2": 1.0,
++   "3": 0.99,
++   "4": 0.99
++  },
++  "rouge": 0.9991666616666636,
++  "rouge_per_turn": {
++   "1": 0.9999999949999995,
++   "2": 0.9999999949999995,
++   "3": 0.9983333283333329,
++   "4": 0.9983333283333329
++  },
++  "seconds": 20.8
++ },
++ "gen|shift|pyramidkv|0.8": {
++  "exact": 0.585,
++  "exact_per_turn": {
++   "1": 0.61,
++   "2": 0.63,
++   "3": 0.56,
++   "4": 0.54
++  },
++  "rouge": 0.9050555505592083,
++  "rouge_per_turn": {
++   "1": 0.9136666616666659,
++   "2": 0.9046666616746664,
++   "3": 0.9051666616686667,
++   "4": 0.8967222172268394
++  },
++  "seconds": 20.2
++ },
++ "gen|shift|pyramidkv|0.9": {
++  "exact": 0.3775,
++  "exact_per_turn": {
++   "1": 0.45,
++   "2": 0.42,
++   "3": 0.34,
++   "4": 0.3
++  },
++  "rouge": 0.8647499950048876,
++  "rouge_per_turn": {
++   "1": 0.8717777727850118,
++   "2": 0.8759444394476793,
++   "3": 0.8614444394476787,
++   "4": 0.8498333283391853
++  },
++  "seconds": 20.0
++ },
++ "gen|shift|pyramidkv|0.95": {
++  "exact": 0.1525,
++  "exact_per_turn": {
++   "1": 0.03,
++   "2": 0.19,
++   "3": 0.19,
++   "4": 0.2
++  },
++  "rouge": 0.7147976140795079,
++  "rouge_per_turn": {
++   "1": 0.46319047126817886,
++   "2": 0.7807222172468397,
++   "3": 0.8097222172328398,
++   "4": 0.8055555505701729
++  },
++  "seconds": 18.6
++ },
++ "gen|shift|seedkv_as_pyramidkv|0.9": {
++  "exact": 0.5975,
++  "exact_per_turn": {
++   "1": 0.29,
++   "2": 0.7,
++   "3": 0.66,
++   "4": 0.74
++  },
++  "rouge": 0.8664166616916283,
++  "rouge_per_turn": {
++   "1": 0.797888883913506,
++   "2": 0.8928333283553331,
++   "3": 0.8817222172488396,
++   "4": 0.8932222172488394
++  },
++  "seconds": 24.8
++ },
++ "gen|shift|seedkv_refresh8|0.9": {
++  "exact": 0.58,
++  "exact_per_turn": {
++   "1": 0.3,
++   "2": 0.67,
++   "3": 0.64,
++   "4": 0.71
++  },
++  "rouge": 0.853638883918505,
++  "rouge_per_turn": {
++   "1": 0.7955555505821728,
++   "2": 0.8748333283613334,
++   "3": 0.8649444394776792,
++   "4": 0.8792222172528397
++  },
++  "seconds": 25.2
++ },
++ "gen|shift|seedkv_retain_only_as_pyramidkv|0.9": {
++  "exact": 0.35,
++  "exact_per_turn": {
++   "1": 0.42,
++   "2": 0.39,
++   "3": 0.34,
++   "4": 0.25
++  },
++  "rouge": 0.8549166616730913,
++  "rouge_per_turn": {
++   "1": 0.8607777727870121,
++   "2": 0.8648333283373334,
++   "3": 0.8584444394496791,
++   "4": 0.8356111061183458
++  },
++  "seconds": 19.6
++ },
++ "gen|shift|seedkv_retain_only|0.9": {
++  "exact": 0.3475,
++  "exact_per_turn": {
++   "1": 0.36,
++   "2": 0.39,
++   "3": 0.37,
++   "4": 0.27
++  },
++  "rouge": 0.849999995007925,
++  "rouge_per_turn": {
++   "1": 0.8301666616826664,
++   "2": 0.8562777727870124,
++   "3": 0.8612222172268393,
++   "4": 0.8523333283351853
++  },
++  "seconds": 19.4
++ },
++ "gen|shift|seedkv|0.8": {
++  "exact": 0.81,
++  "exact_per_turn": {
++   "1": 0.56,
++   "2": 0.92,
++   "3": 0.87,
++   "4": 0.89
++  },
++  "rouge": 0.9403611061214177,
++  "rouge_per_turn": {
++   "1": 0.9055555505561723,
++   "2": 0.9638333283433331,
++   "3": 0.9413333283493331,
++   "4": 0.9507222172368394
++  },
++  "seconds": 24.5
++ },
++ "gen|shift|seedkv|0.9": {
++  "exact": 0.58,
++  "exact_per_turn": {
++   "1": 0.3,
++   "2": 0.67,
++   "3": 0.64,
++   "4": 0.71
++  },
++  "rouge": 0.8538611061408814,
++  "rouge_per_turn": {
++   "1": 0.7955555505821728,
++   "2": 0.8748333283613334,
++   "3": 0.8649444394776792,
++   "4": 0.8801111061423457
++  },
++  "seconds": 24.7
++ },
++ "gen|shift|seedkv|0.95": {
++  "exact": 0.2875,
++  "exact_per_turn": {
++   "1": 0.01,
++   "2": 0.28,
++   "3": 0.37,
++   "4": 0.49
++  },
++  "rouge": 0.6827193312841291,
++  "rouge_per_turn": {
++   "1": 0.42127127937818976,
++   "2": 0.7348282778853138,
++   "3": 0.7446666617286671,
++   "4": 0.8301111061443457
++  },
++  "seconds": 23.7
++ },
++ "gen|shift|turn_conditioned_coverage|0.9": {
++  "exact": 0.7125,
++  "exact_per_turn": {
++   "1": 0.66,
++   "2": 0.79,
++   "3": 0.68,
++   "4": 0.72
++  },
++  "rouge": 0.9229320907289785,
++  "rouge_per_turn": {
++   "1": 0.9126778726971522,
++   "2": 0.949833328383333,
++   "3": 0.9058282778899308,
++   "4": 0.9233888839455062
++  },
++  "seconds": 28.0
++ },
++ "gen|shift|turncast_kv|0.9": {
++  "exact": 0.765,
++  "exact_per_turn": {
++   "1": 0.84,
++   "2": 0.78,
++   "3": 0.72,
++   "4": 0.72
++  },
++  "rouge": 0.9531356787628907,
++  "rouge_per_turn": {
++   "1": 0.9719444394456783,
++   "2": 0.9542649522688542,
++   "3": 0.9426111061123453,
++   "4": 0.9437222172246911
++  },
++  "seconds": 22.7
++ },
++ "ppl|mixed|atlaskv|0.9": {
++  "per_turn": {
++   "1": 3.2084836959838867,
++   "2": 1.2925715446472168,
++   "3": 1.2999184131622314,
++   "4": 1.3096553087234497
++  },
++  "ppl": 1.8254449367523193,
++  "seconds": 22.2
++ },
++ "ppl|mixed|elastic_cache|0.9": {
++  "per_turn": {
++   "1": 24.1671142578125,
++   "2": 2.71661376953125,
++   "3": 3.0891594886779785,
++   "4": 3.4708595275878906
++  },
++  "ppl": 6.671243667602539,
++  "seconds": 22.7
++ },
++ "ppl|mixed|full|0.0": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.001470923423767,
++   "3": 1.001637578010559,
++   "4": 1.006020426750183
++  },
++  "ppl": 1.0418014526367188,
++  "seconds": 22.2
++ },
++ "ppl|mixed|h2o|0.9": {
++  "per_turn": {
++   "1": 13.257798194885254,
++   "2": 26.4609432220459,
++   "3": 30.65288734436035,
++   "4": 18.776752471923828
++  },
++  "ppl": 19.609453201293945,
++  "seconds": 22.4
++ },
++ "ppl|mixed|local_cache|0.9": {
++  "per_turn": {
++   "1": 21.838218688964844,
++   "2": 1.9305996894836426,
++   "3": 2.398073673248291,
++   "4": 2.4806110858917236
++  },
++  "ppl": 5.292196750640869,
++  "seconds": 22.0
++ },
++ "ppl|mixed|meda|0.9": {
++  "per_turn": {
++   "1": 12.279318809509277,
++   "2": 1.5966771841049194,
++   "3": 1.8703957796096802,
++   "4": 2.114727020263672
++  },
++  "ppl": 3.7638139724731445,
++  "seconds": 23.6
++ },
++ "ppl|mixed|pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.8037222623825073,
++   "2": 1.3348084688186646,
++   "3": 1.3192213773727417,
++   "4": 1.4842442274093628
++  },
++  "ppl": 1.5240436792373657,
++  "seconds": 22.2
++ },
++ "ppl|mixed|pyramidkv|0.9": {
++  "per_turn": {
++   "1": 2.4945101737976074,
++   "2": 1.5128517150878906,
++   "3": 1.753458857536316,
++   "4": 1.9484683275222778
++  },
++  "ppl": 1.9846347570419312,
++  "seconds": 22.6
++ },
++ "ppl|mixed|pyramidkv|0.95": {
++  "per_turn": {
++   "1": 17.53044891357422,
++   "2": 2.0261898040771484,
++   "3": 2.3324766159057617,
++   "4": 2.434579610824585
++  },
++  "ppl": 4.87423038482666,
++  "seconds": 21.6
++ },
++ "ppl|mixed|seedkv_as_pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.906561017036438,
++   "2": 1.0674901008605957,
++   "3": 1.1097235679626465,
++   "4": 1.0955400466918945
++  },
++  "ppl": 1.345267653465271,
++  "seconds": 26.7
++ },
++ "ppl|mixed|seedkv_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 4.856960773468018,
++   "2": 1.2933014631271362,
++   "3": 1.2828527688980103,
++   "4": 1.240668535232544
++  },
++  "ppl": 2.1033637523651123,
++  "seconds": 27.2
++ },
++ "ppl|mixed|seedkv_as_pyramidkv|0.95": {
++  "per_turn": {
++   "1": 23.9978084564209,
++   "2": 1.505537748336792,
++   "3": 1.470302700996399,
++   "4": 1.594763994216919
++  },
++  "ppl": 4.286296844482422,
++  "seconds": 26.1
++ },
++ "ppl|mixed|seedkv_nocharge|0.8": {
++  "per_turn": {
++   "1": 2.197218894958496,
++   "2": 1.080935001373291,
++   "3": 1.1150243282318115,
++   "4": 1.1200486421585083
++  },
++  "ppl": 1.4305124282836914,
++  "seconds": 27.1
++ },
++ "ppl|mixed|seedkv_nocharge|0.9": {
++  "per_turn": {
++   "1": 3.726897716522217,
++   "2": 1.25608491897583,
++   "3": 1.2782258987426758,
++   "4": 1.212725043296814
++  },
++  "ppl": 1.882539987564087,
++  "seconds": 27.7
++ },
++ "ppl|mixed|seedkv_nocharge|0.95": {
++  "per_turn": {
++   "1": 20.432689666748047,
++   "2": 1.5025229454040527,
++   "3": 1.4834836721420288,
++   "4": 1.6390982866287231
++  },
++  "ppl": 4.064225196838379,
++  "seconds": 26.1
++ },
++ "ppl|mixed|seedkv_refresh8|0.8": {
++  "per_turn": {
++   "1": 1.890403389930725,
++   "2": 1.0786162614822388,
++   "3": 1.1178462505340576,
++   "4": 1.0998221635818481
++  },
++  "ppl": 1.3470031023025513,
++  "seconds": 29.1
++ },
++ "ppl|mixed|seedkv_refresh8|0.9": {
++  "per_turn": {
++   "1": 2.3201091289520264,
++   "2": 1.329919695854187,
++   "3": 1.2969417572021484,
++   "4": 1.2581818103790283
++  },
++  "ppl": 1.6115329265594482,
++  "seconds": 29.2
++ },
++ "ppl|mixed|seedkv_refresh8|0.95": {
++  "per_turn": {
++   "1": 5.941758632659912,
++   "2": 1.6193923950195312,
++   "3": 1.6209852695465088,
++   "4": 1.578501582145691
++  },
++  "ppl": 2.624518871307373,
++  "seconds": 28.3
++ },
++ "ppl|mixed|seedkv_retain_only_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 2.687939405441284,
++   "2": 1.5396360158920288,
++   "3": 1.804770827293396,
++   "4": 1.927013874053955
++  },
++  "ppl": 2.056212902069092,
++  "seconds": 21.6
++ },
++ "ppl|mixed|seedkv_retain_only|0.8": {
++  "per_turn": {
++   "1": 2.197218894958496,
++   "2": 1.3428176641464233,
++   "3": 1.4088720083236694,
++   "4": 1.546340823173523
++  },
++  "ppl": 1.6804497241973877,
++  "seconds": 21.3
++ },
++ "ppl|mixed|seedkv_retain_only|0.9": {
++  "per_turn": {
++   "1": 3.726897716522217,
++   "2": 1.530206322669983,
++   "3": 1.8606500625610352,
++   "4": 1.9640594720840454
++  },
++  "ppl": 2.3458797931671143,
++  "seconds": 21.0
++ },
++ "ppl|mixed|seedkv_retain_only|0.95": {
++  "per_turn": {
++   "1": 20.432689666748047,
++   "2": 2.125964879989624,
++   "3": 2.2980048656463623,
++   "4": 2.3275511264801025
++  },
++  "ppl": 5.14939022064209,
++  "seconds": 20.9
++ },
++ "ppl|mixed|seedkv|0.8": {
++  "per_turn": {
++   "1": 2.2933108806610107,
++   "2": 1.0828313827514648,
++   "3": 1.1177140474319458,
++   "4": 1.0945308208465576
++  },
++  "ppl": 1.447995662689209,
++  "seconds": 26.8
++ },
++ "ppl|mixed|seedkv|0.9": {
++  "per_turn": {
++   "1": 4.688452243804932,
++   "2": 1.38570237159729,
++   "3": 1.2929047346115112,
++   "4": 1.244774580001831
++  },
++  "ppl": 2.1102848052978516,
++  "seconds": 28.1
++ },
++ "ppl|mixed|seedkv|0.95": {
++  "per_turn": {
++   "1": 24.2127628326416,
++   "2": 1.5384149551391602,
++   "3": 1.633806586265564,
++   "4": 1.5896472930908203
++  },
++  "ppl": 4.4140753746032715,
++  "seconds": 26.4
++ },
++ "ppl|mixed|tgv_kv|0.9": {
++  "per_turn": {
++   "1": 16.66986656188965,
++   "2": 2.2895569801330566,
++   "3": 2.8464841842651367,
++   "4": 2.9158871173858643
++  },
++  "ppl": 5.310727596282959,
++  "seconds": 24.4
++ },
++ "ppl|mixed|turn_conditioned_coverage|0.8": {
++  "per_turn": {
++   "1": 1.2401520013809204,
++   "2": 1.039586067199707,
++   "3": 1.1111159324645996,
++   "4": 1.0533117055892944
++  },
++  "ppl": 1.1295355558395386,
++  "seconds": 31.2
++ },
++ "ppl|mixed|turn_conditioned_coverage|0.9": {
++  "per_turn": {
++   "1": 1.799100637435913,
++   "2": 1.337515115737915,
++   "3": 1.482365608215332,
++   "4": 1.4103715419769287
++  },
++  "ppl": 1.544677734375,
++  "seconds": 29.4
++ },
++ "ppl|mixed|turn_conditioned_coverage|0.95": {
++  "per_turn": {
++   "1": 4.285865306854248,
++   "2": 1.894311785697937,
++   "3": 2.277681827545166,
++   "4": 2.1740918159484863
++  },
++  "ppl": 2.7534024715423584,
++  "seconds": 28.3
++ },
++ "ppl|mixed|turn_conditioned_layerwise_eviction|0.8": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.178667426109314,
++   "3": 1.4387789964675903,
++   "4": 1.3967316150665283
++  },
++  "ppl": 1.2449361085891724,
++  "seconds": 24.0
++ },
++ "ppl|mixed|turn_conditioned_layerwise_eviction|0.9": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.3890395164489746,
++   "3": 1.664232611656189,
++   "4": 1.5630074739456177
++  },
++  "ppl": 1.3593101501464844,
++  "seconds": 23.4
++ },
++ "ppl|mixed|turn_conditioned_layerwise_eviction|0.95": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.5339041948318481,
++   "3": 1.877748727798462,
++   "4": 1.9213271141052246
++  },
++  "ppl": 1.4855067729949951,
++  "seconds": 24.7
++ },
++ "ppl|mixed|turn_conditioned_layerwise_merge|0.8": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.3318003416061401,
++   "3": 1.4681710004806519,
++   "4": 1.4276279211044312
++  },
++  "ppl": 1.2879372835159302,
++  "seconds": 30.5
++ },
++ "ppl|mixed|turn_conditioned_layerwise_merge|0.9": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.548720359802246,
++   "3": 1.7521454095840454,
++   "4": 1.7640715837478638
++  },
++  "ppl": 1.441066861152649,
++  "seconds": 29.4
++ },
++ "ppl|mixed|turn_conditioned_layerwise_merge|0.95": {
++  "per_turn": {
++   "1": 1.1096559762954712,
++   "2": 1.76091730594635,
++   "3": 1.940476894378662,
++   "4": 2.1406404972076416
++  },
++  "ppl": 1.5739058256149292,
++  "seconds": 29.3
++ },
++ "ppl|mixed|turncast_kv|0.8": {
++  "per_turn": {
++   "1": 1.1623047590255737,
++   "2": 1.015568733215332,
++   "3": 1.0400433540344238,
++   "4": 1.0838117599487305
++  },
++  "ppl": 1.0883296728134155,
++  "seconds": 24.2
++ },
++ "ppl|mixed|turncast_kv|0.9": {
++  "per_turn": {
++   "1": 1.3176721334457397,
++   "2": 1.1247422695159912,
++   "3": 1.2949641942977905,
++   "4": 1.309022068977356
++  },
++  "ppl": 1.269014835357666,
++  "seconds": 25.0
++ },
++ "ppl|mixed|turncast_kv|0.95": {
++  "per_turn": {
++   "1": 2.561450242996216,
++   "2": 1.9925246238708496,
++   "3": 2.1967461109161377,
++   "4": 2.3559041023254395
++  },
++  "ppl": 2.314235210418701,
++  "seconds": 23.9
++ },
++ "ppl|same|atlaskv|0.9": {
++  "per_turn": {
++   "1": 2.3920493125915527,
++   "2": 1.3186427354812622,
++   "3": 1.2424888610839844,
++   "4": 1.2782132625579834
++  },
++  "ppl": 1.4697885513305664,
++  "seconds": 22.2
++ },
++ "ppl|same|elastic_cache|0.9": {
++  "per_turn": {
++   "1": 4.494345664978027,
++   "2": 10.608810424804688,
++   "3": 4.655358791351318,
++   "4": 5.652457237243652
++  },
++  "ppl": 6.023173809051514,
++  "seconds": 22.5
++ },
++ "ppl|same|full|0.0": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.0049927234649658,
++   "3": 1.0094730854034424,
++   "4": 1.0168612003326416
++  },
++  "ppl": 1.0094612836837769,
++  "seconds": 22.0
++ },
++ "ppl|same|h2o|0.9": {
++  "per_turn": {
++   "1": 4.5954813957214355,
++   "2": 11.943605422973633,
++   "3": 30.638391494750977,
++   "4": 27.92522621154785
++  },
++  "ppl": 15.369300842285156,
++  "seconds": 22.1
++ },
++ "ppl|same|local_cache|0.9": {
++  "per_turn": {
++   "1": 4.24551248550415,
++   "2": 2.117180824279785,
++   "3": 1.9404187202453613,
++   "4": 1.954403281211853
++  },
++  "ppl": 2.3653101921081543,
++  "seconds": 21.5
++ },
++ "ppl|same|meda|0.9": {
++  "per_turn": {
++   "1": 15.891247749328613,
++   "2": 1.6679975986480713,
++   "3": 1.6614887714385986,
++   "4": 1.7604552507400513
++  },
++  "ppl": 2.784357786178589,
++  "seconds": 23.3
++ },
++ "ppl|same|pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.2464773654937744,
++   "2": 1.2267355918884277,
++   "3": 1.187416911125183,
++   "4": 1.214922547340393
++  },
++  "ppl": 1.2177635431289673,
++  "seconds": 22.0
++ },
++ "ppl|same|pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.651383399963379,
++   "2": 1.4573719501495361,
++   "3": 1.4516950845718384,
++   "4": 1.4752743244171143
++  },
++  "ppl": 1.501575231552124,
++  "seconds": 20.9
++ },
++ "ppl|same|pyramidkv|0.95": {
++  "per_turn": {
++   "1": 4.151103496551514,
++   "2": 2.010161876678467,
++   "3": 1.9217580556869507,
++   "4": 1.9943002462387085
++  },
++  "ppl": 2.3285274505615234,
++  "seconds": 21.2
++ },
++ "ppl|same|seedkv_as_pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.3444768190383911,
++   "2": 1.1307792663574219,
++   "3": 1.1196050643920898,
++   "4": 1.1676101684570312
++  },
++  "ppl": 1.1818712949752808,
++  "seconds": 27.0
++ },
++ "ppl|same|seedkv_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.9923299551010132,
++   "2": 1.2212086915969849,
++   "3": 1.2902708053588867,
++   "4": 1.251315951347351
++  },
++  "ppl": 1.3891849517822266,
++  "seconds": 26.9
++ },
++ "ppl|same|seedkv_as_pyramidkv|0.95": {
++  "per_turn": {
++   "1": 4.053616523742676,
++   "2": 1.435744047164917,
++   "3": 1.3437227010726929,
++   "4": 1.3441520929336548
++  },
++  "ppl": 1.7460212707519531,
++  "seconds": 25.7
++ },
++ "ppl|same|seedkv_nocharge|0.8": {
++  "per_turn": {
++   "1": 1.300882339477539,
++   "2": 1.1292670965194702,
++   "3": 1.0975033044815063,
++   "4": 1.1746267080307007
++  },
++  "ppl": 1.1687253713607788,
++  "seconds": 27.1
++ },
++ "ppl|same|seedkv_nocharge|0.9": {
++  "per_turn": {
++   "1": 1.7933050394058228,
++   "2": 1.2217645645141602,
++   "3": 1.2075916528701782,
++   "4": 1.2437714338302612
++  },
++  "ppl": 1.332401990890503,
++  "seconds": 27.2
++ },
++ "ppl|same|seedkv_nocharge|0.95": {
++  "per_turn": {
++   "1": 3.920623302459717,
++   "2": 1.3325352668762207,
++   "3": 1.4354543685913086,
++   "4": 1.3457751274108887
++  },
++  "ppl": 1.7293493747711182,
++  "seconds": 27.2
++ },
++ "ppl|same|seedkv_refresh8|0.8": {
++  "per_turn": {
++   "1": 1.3594292402267456,
++   "2": 1.139233946800232,
++   "3": 1.113905429840088,
++   "4": 1.1737334728240967
++  },
++  "ppl": 1.1871463060379028,
++  "seconds": 27.3
++ },
++ "ppl|same|seedkv_refresh8|0.9": {
++  "per_turn": {
++   "1": 1.9758341312408447,
++   "2": 1.22674560546875,
++   "3": 1.272417664527893,
++   "4": 1.271897792816162
++  },
++  "ppl": 1.3892441987991333,
++  "seconds": 28.7
++ },
++ "ppl|same|seedkv_refresh8|0.95": {
++  "per_turn": {
++   "1": 4.020107269287109,
++   "2": 1.5206494331359863,
++   "3": 1.4806424379348755,
++   "4": 1.3410923480987549
++  },
++  "ppl": 1.8125183582305908,
++  "seconds": 27.2
++ },
++ "ppl|same|seedkv_retain_only_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.666696548461914,
++   "2": 1.4841232299804688,
++   "3": 1.4633545875549316,
++   "4": 1.5432056188583374
++  },
++  "ppl": 1.5328646898269653,
++  "seconds": 21.5
++ },
++ "ppl|same|seedkv_retain_only|0.8": {
++  "per_turn": {
++   "1": 1.300882339477539,
++   "2": 1.2587140798568726,
++   "3": 1.2462881803512573,
++   "4": 1.2523019313812256
++  },
++  "ppl": 1.263026475906372,
++  "seconds": 21.2
++ },
++ "ppl|same|seedkv_retain_only|0.9": {
++  "per_turn": {
++   "1": 1.7933050394058228,
++   "2": 1.5073375701904297,
++   "3": 1.4994910955429077,
++   "4": 1.5336217880249023
++  },
++  "ppl": 1.5714716911315918,
++  "seconds": 21.1
++ },
++ "ppl|same|seedkv_retain_only|0.95": {
++  "per_turn": {
++   "1": 3.920623302459717,
++   "2": 2.0391147136688232,
++   "3": 1.9263278245925903,
++   "4": 1.924014687538147
++  },
++  "ppl": 2.2876346111297607,
++  "seconds": 21.1
++ },
++ "ppl|same|seedkv|0.8": {
++  "per_turn": {
++   "1": 1.3594292402267456,
++   "2": 1.139233946800232,
++   "3": 1.113905429840088,
++   "4": 1.1737159490585327
++  },
++  "ppl": 1.1871416568756104,
++  "seconds": 27.6
++ },
++ "ppl|same|seedkv|0.9": {
++  "per_turn": {
++   "1": 1.9758341312408447,
++   "2": 1.22674560546875,
++   "3": 1.2746379375457764,
++   "4": 1.2605714797973633
++  },
++  "ppl": 1.3866115808486938,
++  "seconds": 26.8
++ },
++ "ppl|same|seedkv|0.95": {
++  "per_turn": {
++   "1": 4.020107269287109,
++   "2": 1.5270910263061523,
++   "3": 1.4653207063674927,
++   "4": 1.3335033655166626
++  },
++  "ppl": 1.8070001602172852,
++  "seconds": 27.1
++ },
++ "ppl|same|tgv_kv|0.9": {
++  "per_turn": {
++   "1": 2.173086166381836,
++   "2": 3.504164934158325,
++   "3": 2.4936366081237793,
++   "4": 2.4266316890716553
++  },
++  "ppl": 2.624135732650757,
++  "seconds": 24.1
++ },
++ "ppl|same|turn_conditioned_coverage|0.8": {
++  "per_turn": {
++   "1": 1.1112185716629028,
++   "2": 1.06637704372406,
++   "3": 1.0978261232376099,
++   "4": 1.1470181941986084
++  },
++  "ppl": 1.1050926446914673,
++  "seconds": 31.0
++ },
++ "ppl|same|turn_conditioned_coverage|0.9": {
++  "per_turn": {
++   "1": 1.558679223060608,
++   "2": 1.191589117050171,
++   "3": 1.2139086723327637,
++   "4": 1.316781759262085
++  },
++  "ppl": 1.3043314218521118,
++  "seconds": 28.8
++ },
++ "ppl|same|turn_conditioned_coverage|0.95": {
++  "per_turn": {
++   "1": 5.981298446655273,
++   "2": 2.068519115447998,
++   "3": 2.0666260719299316,
++   "4": 2.237222671508789
++  },
++  "ppl": 2.6706230640411377,
++  "seconds": 27.9
++ },
++ "ppl|same|turn_conditioned_layerwise_eviction|0.8": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.203548789024353,
++   "3": 1.152933955192566,
++   "4": 1.2378547191619873
++  },
++  "ppl": 1.1524893045425415,
++  "seconds": 23.9
++ },
++ "ppl|same|turn_conditioned_layerwise_eviction|0.9": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.6409778594970703,
++   "3": 1.5912405252456665,
++   "4": 1.7080471515655518
++  },
++  "ppl": 1.4762853384017944,
++  "seconds": 24.0
++ },
++ "ppl|same|turn_conditioned_layerwise_eviction|0.95": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.7530685663223267,
++   "3": 1.6853374242782593,
++   "4": 1.787872314453125
++  },
++  "ppl": 1.5425200462341309,
++  "seconds": 23.5
++ },
++ "ppl|same|turn_conditioned_layerwise_merge|0.8": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.4519208669662476,
++   "3": 1.4462015628814697,
++   "4": 1.5929303169250488
++  },
++  "ppl": 1.3701120615005493,
++  "seconds": 29.1
++ },
++ "ppl|same|turn_conditioned_layerwise_merge|0.9": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.7150681018829346,
++   "3": 1.589220404624939,
++   "4": 1.6558126211166382
++  },
++  "ppl": 1.4807827472686768,
++  "seconds": 30.1
++ },
++ "ppl|same|turn_conditioned_layerwise_merge|0.95": {
++  "per_turn": {
++   "1": 1.0060005187988281,
++   "2": 1.9205396175384521,
++   "3": 1.8055057525634766,
++   "4": 1.9118016958236694
++  },
++  "ppl": 1.6362009048461914,
++  "seconds": 29.2
++ },
++ "ppl|same|turncast_kv|0.8": {
++  "per_turn": {
++   "1": 1.0076555013656616,
++   "2": 1.0145095586776733,
++   "3": 1.0158053636550903,
++   "4": 1.0206526517868042
++  },
++  "ppl": 1.0149223804473877,
++  "seconds": 23.2
++ },
++ "ppl|same|turncast_kv|0.9": {
++  "per_turn": {
++   "1": 1.0336077213287354,
++   "2": 1.060881495475769,
++   "3": 1.0328643321990967,
++   "4": 1.037136435508728
++  },
++  "ppl": 1.0413814783096313,
++  "seconds": 23.6
++ },
++ "ppl|same|turncast_kv|0.95": {
++  "per_turn": {
++   "1": 3.4044909477233887,
++   "2": 1.863484263420105,
++   "3": 1.8521287441253662,
++   "4": 1.9131479263305664
++  },
++  "ppl": 2.1409530639648438,
++  "seconds": 23.1
++ },
++ "ppl|shift|atlaskv|0.9": {
++  "per_turn": {
++   "1": 2.838472604751587,
++   "2": 1.4220033884048462,
++   "3": 1.264248013496399,
++   "4": 1.2886978387832642
++  },
++  "ppl": 1.6053144931793213,
++  "seconds": 20.1
++ },
++ "ppl|shift|elastic_cache|0.9": {
++  "per_turn": {
++   "1": 4.394861698150635,
++   "2": 2.1778366565704346,
++   "3": 2.5629923343658447,
++   "4": 2.4422268867492676
++  },
++  "ppl": 2.7873544692993164,
++  "seconds": 20.3
++ },
++ "ppl|shift|full|0.0": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.0015535354614258,
++   "3": 1.0094319581985474,
++   "4": 1.002559781074524
++  },
++  "ppl": 1.0035685300827026,
++  "seconds": 20.5
++ },
++ "ppl|shift|h2o|0.9": {
++  "per_turn": {
++   "1": 9.182849884033203,
++   "2": 25.395832061767578,
++   "3": 29.557767868041992,
++   "4": 15.759358406066895
++  },
++  "ppl": 18.09859275817871,
++  "seconds": 20.7
++ },
++ "ppl|shift|local_cache|0.9": {
++  "per_turn": {
++   "1": 5.053983211517334,
++   "2": 2.0464847087860107,
++   "3": 2.368889570236206,
++   "4": 2.4897141456604004
++  },
++  "ppl": 2.8016390800476074,
++  "seconds": 20.9
++ },
++ "ppl|shift|meda|0.9": {
++  "per_turn": {
++   "1": 14.87258529663086,
++   "2": 1.5596139430999756,
++   "3": 1.8336410522460938,
++   "4": 2.025688409805298
++  },
++  "ppl": 3.067115068435669,
++  "seconds": 21.8
++ },
++ "ppl|shift|pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.4404140710830688,
++   "2": 1.3387430906295776,
++   "3": 1.543328046798706,
++   "4": 1.565058708190918
++  },
++  "ppl": 1.4689005613327026,
++  "seconds": 20.8
++ },
++ "ppl|shift|pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.6174697875976562,
++   "2": 1.5971121788024902,
++   "3": 1.9130538702011108,
++   "4": 2.044116497039795
++  },
++  "ppl": 1.7820056676864624,
++  "seconds": 19.7
++ },
++ "ppl|shift|pyramidkv|0.95": {
++  "per_turn": {
++   "1": 4.656384468078613,
++   "2": 2.117677688598633,
++   "3": 2.229093551635742,
++   "4": 2.6431260108947754
++  },
++  "ppl": 2.76702618598938,
++  "seconds": 19.2
++ },
++ "ppl|shift|seedkv_as_pyramidkv|0.8": {
++  "per_turn": {
++   "1": 1.4956914186477661,
++   "2": 1.0199499130249023,
++   "3": 1.070666790008545,
++   "4": 1.039305567741394
++  },
++  "ppl": 1.142727017402649,
++  "seconds": 24.7
++ },
++ "ppl|shift|seedkv_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.8391172885894775,
++   "2": 1.2035528421401978,
++   "3": 1.3036540746688843,
++   "4": 1.1596444845199585
++  },
++  "ppl": 1.354199767112732,
++  "seconds": 25.3
++ },
++ "ppl|shift|seedkv_as_pyramidkv|0.95": {
++  "per_turn": {
++   "1": 4.879454612731934,
++   "2": 1.5668612718582153,
++   "3": 1.6789920330047607,
++   "4": 1.374352216720581
++  },
++  "ppl": 2.0568413734436035,
++  "seconds": 24.2
++ },
++ "ppl|shift|seedkv_nocharge|0.8": {
++  "per_turn": {
++   "1": 1.487471103668213,
++   "2": 1.0214433670043945,
++   "3": 1.0809309482574463,
++   "4": 1.038535237312317
++  },
++  "ppl": 1.1440472602844238,
++  "seconds": 25.4
++ },
++ "ppl|shift|seedkv_nocharge|0.9": {
++  "per_turn": {
++   "1": 1.6981443166732788,
++   "2": 1.1879420280456543,
++   "3": 1.253456473350525,
++   "4": 1.1398948431015015
++  },
++  "ppl": 1.3043850660324097,
++  "seconds": 25.2
++ },
++ "ppl|shift|seedkv_nocharge|0.95": {
++  "per_turn": {
++   "1": 4.441193103790283,
++   "2": 1.543874740600586,
++   "3": 1.6661227941513062,
++   "4": 1.3895450830459595
++  },
++  "ppl": 2.002688407897949,
++  "seconds": 24.7
++ },
++ "ppl|shift|seedkv_refresh8|0.8": {
++  "per_turn": {
++   "1": 1.516257882118225,
++   "2": 1.0267894268035889,
++   "3": 1.082504391670227,
++   "4": 1.0461082458496094
++  },
++  "ppl": 1.1536120176315308,
++  "seconds": 26.2
++ },
++ "ppl|shift|seedkv_refresh8|0.9": {
++  "per_turn": {
++   "1": 1.8164243698120117,
++   "2": 1.2417188882827759,
++   "3": 1.30159592628479,
++   "4": 1.161849856376648
++  },
++  "ppl": 1.3606034517288208,
++  "seconds": 26.5
++ },
++ "ppl|shift|seedkv_refresh8|0.95": {
++  "per_turn": {
++   "1": 4.818572044372559,
++   "2": 1.5799671411514282,
++   "3": 1.6508082151412964,
++   "4": 1.4111785888671875
++  },
++  "ppl": 2.059478759765625,
++  "seconds": 25.1
++ },
++ "ppl|shift|seedkv_retain_only_as_pyramidkv|0.9": {
++  "per_turn": {
++   "1": 1.6302379369735718,
++   "2": 1.5993329286575317,
++   "3": 1.9211640357971191,
++   "4": 2.1418979167938232
++  },
++  "ppl": 1.8089959621429443,
++  "seconds": 19.7
++ },
++ "ppl|shift|seedkv_retain_only|0.8": {
++  "per_turn": {
++   "1": 1.487471103668213,
++   "2": 1.4017714262008667,
++   "3": 1.5495983362197876,
++   "4": 1.6041663885116577
++  },
++  "ppl": 1.5087412595748901,
++  "seconds": 19.7
++ },
++ "ppl|shift|seedkv_retain_only|0.9": {
++  "per_turn": {
++   "1": 1.6981443166732788,
++   "2": 1.614482045173645,
++   "3": 2.0002689361572266,
++   "4": 2.077085018157959
++  },
++  "ppl": 1.8364230394363403,
++  "seconds": 19.4
++ },
++ "ppl|shift|seedkv_retain_only|0.95": {
++  "per_turn": {
++   "1": 4.441193103790283,
++   "2": 2.0934221744537354,
++   "3": 2.2333567142486572,
++   "4": 2.456782579421997
++  },
++  "ppl": 2.6782894134521484,
++  "seconds": 19.3
++ },
++ "ppl|shift|seedkv|0.8": {
++  "per_turn": {
++   "1": 1.516257882118225,
++   "2": 1.0267894268035889,
++   "3": 1.082504391670227,
++   "4": 1.0461082458496094
++  },
++  "ppl": 1.1536120176315308,
++  "seconds": 25.1
++ },
++ "ppl|shift|seedkv|0.9": {
++  "per_turn": {
++   "1": 1.8164243698120117,
++   "2": 1.2417188882827759,
++   "3": 1.30159592628479,
++   "4": 1.161849856376648
++  },
++  "ppl": 1.3606034517288208,
++  "seconds": 25.7
++ },
++ "ppl|shift|seedkv|0.95": {
++  "per_turn": {
++   "1": 4.818572044372559,
++   "2": 1.5918476581573486,
++   "3": 1.68526291847229,
++   "4": 1.4097886085510254
++  },
++  "ppl": 2.073432683944702,
++  "seconds": 23.8
++ },
++ "ppl|shift|tgv_kv|0.9": {
++  "per_turn": {
++   "1": 1.8170804977416992,
++   "2": 2.084331512451172,
++   "3": 2.556400775909424,
++   "4": 2.4927425384521484
++  },
++  "ppl": 2.2144722938537598,
++  "seconds": 21.6
++ },
++ "ppl|shift|turn_conditioned_coverage|0.8": {
++  "per_turn": {
++   "1": 1.094379186630249,
++   "2": 1.049315333366394,
++   "3": 1.0800262689590454,
++   "4": 1.124249815940857
++  },
++  "ppl": 1.086693525314331,
++  "seconds": 28.2
++ },
++ "ppl|shift|turn_conditioned_coverage|0.9": {
++  "per_turn": {
++   "1": 1.5915310382843018,
++   "2": 1.243262767791748,
++   "3": 1.4133496284484863,
++   "4": 1.303131103515625
++  },
++  "ppl": 1.3824193477630615,
++  "seconds": 27.1
++ },
++ "ppl|shift|turn_conditioned_coverage|0.95": {
++  "per_turn": {
++   "1": 7.117592811584473,
++   "2": 1.7752878665924072,
++   "3": 2.286198377609253,
++   "4": 2.2387735843658447
++  },
++  "ppl": 2.8467001914978027,
++  "seconds": 26.0
++ },
++ "ppl|shift|turn_conditioned_layerwise_eviction|0.8": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.3928478956222534,
++   "3": 1.445929765701294,
++   "4": 1.3621495962142944
++  },
++  "ppl": 1.285830020904541,
++  "seconds": 22.0
++ },
++ "ppl|shift|turn_conditioned_layerwise_eviction|0.9": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.665434718132019,
++   "3": 1.8606303930282593,
++   "4": 1.9825412034988403
++  },
++  "ppl": 1.5716371536254883,
++  "seconds": 21.6
++ },
++ "ppl|shift|turn_conditioned_layerwise_eviction|0.95": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.7643507719039917,
++   "3": 2.1285767555236816,
++   "4": 2.019481897354126
++  },
++  "ppl": 1.6561870574951172,
++  "seconds": 22.0
++ },
++ "ppl|shift|turn_conditioned_layerwise_merge|0.8": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.3022507429122925,
++   "3": 1.4700055122375488,
++   "4": 1.4623476266860962
++  },
++  "ppl": 1.2923139333724976,
++  "seconds": 26.0
++ },
++ "ppl|shift|turn_conditioned_layerwise_merge|0.9": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.7101610898971558,
++   "3": 1.6513842344284058,
++   "4": 1.708756685256958
++  },
++  "ppl": 1.4800128936767578,
++  "seconds": 27.3
++ },
++ "ppl|shift|turn_conditioned_layerwise_merge|0.95": {
++  "per_turn": {
++   "1": 1.0008149147033691,
++   "2": 1.8512400388717651,
++   "3": 1.8715873956680298,
++   "4": 2.007535934448242
++  },
++  "ppl": 1.6210224628448486,
++  "seconds": 26.5
++ },
++ "ppl|shift|turncast_kv|0.8": {
++  "per_turn": {
++   "1": 1.019278645515442,
++   "2": 1.0389084815979004,
++   "3": 1.1045650243759155,
++   "4": 1.0679707527160645
++  },
++  "ppl": 1.0570052862167358,
++  "seconds": 22.0
++ },
++ "ppl|shift|turncast_kv|0.9": {
++  "per_turn": {
++   "1": 1.0873159170150757,
++   "2": 1.181240439414978,
++   "3": 1.3075683116912842,
++   "4": 1.3293510675430298
++  },
++  "ppl": 1.2217280864715576,
++  "seconds": 23.1
++ },
++ "ppl|shift|turncast_kv|0.95": {
++  "per_turn": {
++   "1": 3.288321018218994,
++   "2": 2.0571532249450684,
++   "3": 2.2581987380981445,
++   "4": 2.4223504066467285
++  },
++  "ppl": 2.469369411468506,
++  "seconds": 21.5
++ }
++}
+\ No newline at end of file
+diff --git a/seedkv/test_seedkv.py b/seedkv/test_seedkv.py
+new file mode 100644
+index 0000000..7396c63
+--- /dev/null
++++ b/seedkv/test_seedkv.py
+@@ -0,0 +1,289 @@
++"""
++Correctness checks for SeedKV (CPU, any small LLaVA checkpoint; see make_standin.py).
++
++Everything runs through the unchanged evaluators (eval_ppl_final.py and
++eval_rouge_final2.py with the CPU shims of turncast/run_cpu.py).
++
++ 1. Exact regeneration   the KV rebuilt from the seed equals the original prefill KV.
++ 2. Small seed           vision features + token ids; its size and budget charge.
++ 3. Budget               KV + seed never exceeds L * (C + appended tokens) except
++                         while a later turn's question is being read; at rest
++                         no prefill entry is resident.
++ 4. Layout               every head keeps sorted, unique positions; the same
++                         count in every head; the attention sink is kept
++                         whenever prefill entries are resident.
++ 5. No-op at ratio 0     identical perplexity to the full cache.
++ 6. Cost                 same number of evaluator forwards as PyramidKV, plus
++                         exactly one regeneration per later turn.
++ 7. Fallbacks            without prepare_turn() / without begin_answer().
++ 8. Generation           eval_rouge_final2.py runs; refresh_every works.
++ 9. Options              the retain-only ablation and the PyramidKVCache-matched schedule.
++10. Determinism          two runs give the same perplexity.
++
++Usage: python seedkv/test_seedkv.py --standin /path/standin [--samples 6]
++"""
++import argparse
++import json
++import os
++import sys
++import tempfile
++import warnings
++
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++
++import harness  # noqa: E402
++from harness import Recorder, base_argv, run, run_ppl, run_rouge  # noqa: E402
++
++sys.path.insert(0, harness.REPO)
++from kv_cache_seedkv import SeedKVCache, layer_budgets  # noqa: E402
++
++FAILED = []
++
++
++def check(name, ok, detail=""):
++    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""), flush=True)
++    if not ok:
++        FAILED.append(name)
++
++
++def ppl_argv(args, method, ratio, name, extra=()):
++    return base_argv(args.standin, args.split, method, ratio, args.samples, args.work, name) + list(extra)
++
++
++def nominal_budgets(events, ratio, layers):
++    """L * (C(base) + appended) for every event, C(n) = int(n * (1 - ratio))."""
++    out, base, logical = [], None, 0
++    for event in events:
++        if event["kind"] == "call":
++            logical = event["logical"]
++            if base is None or event["first"]:
++                base = logical
++        elif event["kind"] == "finalize":
++            base = logical
++        out.append(layers * (int(base * (1.0 - ratio)) + (logical - base)))
++    return out
++
++
++def mark_first_calls(events):
++    seen = set()
++    for event in events:
++        event["first"] = event["kind"] == "call" and event["cache"] not in seen
++        if event["kind"] == "call":
++            seen.add(event["cache"])
++    return events
++
++
++def test_budget_schedule():
++    for allocation in ("pyramid", "uniform"):
++        for total, length in ((8 * 19 - 5, 186), (8 * 62 - 19, 620), (8 * 113, 1136), (8 * 7, 40)):
++            budgets = layer_budgets(8, total, min(8, total // 8 - 1), [length] * 8, allocation)
++            check(f"budget schedule {allocation} total={total}",
++                  sum(budgets) == total and all(a >= b for a, b in zip(budgets, budgets[1:])),
++                  f"{budgets}")
++
++
++def test_structure(args, ratio):
++    """Tests 1-4 and 6 from one instrumented run."""
++    stash, problems, layout_checks = {}, [], [0]
++
++    def inspect(kind, cache, before, after):
++        if not isinstance(cache, SeedKVCache):
++            return
++        if kind == "call" and id(cache) not in stash:
++            stash[id(cache)] = [(k.clone(), v.clone()) for k, v in before]      # the full prefill
++        for layer, (key, _) in enumerate(after):
++            pos = cache._full_pos(layer, key.shape[2], key.shape[1])
++            layout_checks[0] += 1
++            if pos.shape[1] != key.shape[2]:
++                problems.append(f"{kind}: layer {layer} bookkeeping {pos.shape[1]} != KV {key.shape[2]}")
++            if pos.shape[1] > 1 and not bool((pos[:, 1:] > pos[:, :-1]).all()):
++                problems.append(f"{kind}: layer {layer} positions not sorted/unique")
++            a_count = cache._a_count[layer]
++            if a_count and not bool((pos[:, 0] == 0).all()):
++                problems.append(f"{kind}: layer {layer} lost the attention sink")
++            if a_count and not bool((pos[:, :a_count] < cache.n0).all()):
++                problems.append(f"{kind}: layer {layer} prefill entries not at the front")
++            if bool((pos[:, a_count:] < cache.n0).any()):
++                problems.append(f"{kind}: layer {layer} has prefill entries outside the front block")
++            if cache.state == "rest" and a_count:
++                problems.append(f"{kind}: layer {layer} holds prefill entries at rest")
++
++    with Recorder("eval_ppl_final.py", inspect=inspect) as seed:
++        run("eval_ppl_final.py", ppl_argv(args, "seedkv", ratio, f"t_seed_{ratio}"))
++    with Recorder("eval_ppl_final.py") as pyramid:
++        run("eval_ppl_final.py", ppl_argv(args, "pyramidkv", ratio, f"t_pyr_{ratio}"))
++
++    regenerations = sum(c.rehydrations for c in seed.caches)
++
++    # 1. exact regeneration, 2. seed
++    worst = 0.0
++    for cache in seed.caches:
++        full = stash[id(cache)]
++        for (key, value), (ref_key, ref_value) in zip(cache._regenerate(), full):
++            worst = max(worst, float((key - ref_key).abs().max()), float((value - ref_value).abs().max()))
++    check(f"ratio {ratio}: regenerated prefill KV equals the original", worst == 0.0, f"max |diff| = {worst:.2e}")
++    cache = seed.caches[0]
++    full_bytes = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in stash[id(cache)])
++    check(f"ratio {ratio}: seed is features + token ids", cache.seed_kind == "features+ids",
++          f"{cache.seed_kind}, {cache.seed_bytes} bytes = {100.0 * cache.seed_bytes / full_bytes:.2f}% of the "
++          f"prefill KV, charged as {cache.charge} KV entries = {cache.charge / cache.layer_num:.2f} per layer")
++
++    # 3. budget
++    layers = len(seed.events[0]["sizes"])
++    events = mark_first_calls([e for e in seed.events if e["kind"] != "prepare"])
++    nominal = nominal_budgets(events, float(ratio), layers)
++    over, hydrated_tokens, peak = 0, 0, 0.0
++    for event, budget in zip(events, nominal):
++        total = sum(event["sizes"]) + seed.caches[event["cache"]].charge
++        if event["state"] == "hydrated":
++            hydrated_tokens += 1
++            peak = max(peak, total / budget)
++        elif total > budget:
++            over += 1
++    turns = sum(1 for e in events if e["kind"] == "finalize")
++    check(f"ratio {ratio}: KV + seed within L*(C + appended) outside question reading", over == 0,
++          f"{len(events)} cache calls checked, {over} over budget")
++    print(f"       question reading: {hydrated_tokens / max(1, turns - len(seed.caches)):.1f} tokens per later turn "
++          f"above budget, peak {peak:.1f}x the budget")
++    pyr_events = mark_first_calls(pyramid.events)
++    same = len(pyr_events) == len(events)
++    if same:
++        # Informational: PyramidKVCache rounds its pyramid down and cannot refill a
++        # layer it shrank earlier, so its realised size can sit below the budget.
++        diff = [(sum(a["sizes"]) + seed.caches[a["cache"]].charge - sum(b["sizes"])) / layers
++                for a, b in zip(events, pyr_events) if a["state"] != "hydrated"]
++        print(f"       SeedKV(+seed) minus PyramidKV, entries per layer outside question reading: "
++              f"mean {sum(diff) / len(diff):+.1f}, max {max(diff):+.1f}")
++    rest = [e for e in events if e["kind"] == "finalize"]
++    rest_pyr = [e for e in pyr_events if e["kind"] == "finalize"]
++    print(f"       at rest, entries per layer: SeedKV {sum(sum(e['sizes']) for e in rest) / len(rest) / layers:.1f} "
++          f"(+{seed.caches[0].charge / layers:.1f} seed), PyramidKV "
++          f"{sum(sum(e['sizes']) for e in rest_pyr) / len(rest_pyr) / layers:.1f}")
++
++    # 4. layout
++    check(f"ratio {ratio}: per-head layout", not problems,
++          f"{layout_checks[0]} layer states checked" + (f"; first problem: {problems[0]}" if problems else ""))
++
++    # 6. cost
++    later_turns = turns - len(seed.caches)
++    check(f"ratio {ratio}: evaluator forwards equal PyramidKV's", seed.forwards == pyramid.forwards,
++          f"{seed.forwards} vs {pyramid.forwards}")
++    check(f"ratio {ratio}: one regeneration per later turn", regenerations == later_turns,
++          f"{regenerations} regenerations for {later_turns} later turns")
++
++
++def test_noop(args):
++    full = run_ppl(args.standin, args.split, "local_cache", 0.0, args.samples, args.work, "t_full")
++    seed = run_ppl(args.standin, args.split, "seedkv", 0.0, args.samples, args.work, "t_seed_0")
++    check("ratio 0: identical to the full cache", full["overall_ppl"] == seed["overall_ppl"],
++          f"{seed['overall_ppl']:.6f} vs {full['overall_ppl']:.6f}")
++    return full["overall_ppl"]
++
++
++def test_fallbacks(args, ratio):
++    reference = run_ppl(args.standin, args.split, "seedkv", ratio, args.samples, args.work, "t_ref")
++
++    def no_prepare(cache):
++        if isinstance(cache, SeedKVCache):
++            cache.prepare_turn = lambda past, num_of_token=None: past
++
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        with Recorder("eval_ppl_final.py", on_build=no_prepare) as lazy:
++            run("eval_ppl_final.py", ppl_argv(args, "seedkv", ratio, "t_lazy"))
++    turns = sum(1 for e in lazy.events if e["kind"] == "finalize")
++    regenerations = sum(c.rehydrations for c in lazy.caches)
++    with open(os.path.join(args.work, "t_lazy.json")) as handle:
++        lazy_ppl = json.load(handle)["overall_ppl"]
++    check("fallback without prepare_turn(): regenerates inside the first call of the turn",
++          regenerations == turns - len(lazy.caches),
++          f"PPL {lazy_ppl:.4f} vs {reference['overall_ppl']:.4f} with prepare_turn()")
++
++    def no_begin(cache):
++        if isinstance(cache, SeedKVCache):
++            cache.begin_answer = lambda: None
++            cache.max_hydrated_tokens = 4
++
++    with Recorder("eval_ppl_final.py", on_build=no_begin) as capped:
++        run("eval_ppl_final.py", ppl_argv(args, "seedkv", ratio, "t_capped"))
++    longest, current = 0, 0
++    for event in capped.events:
++        current = current + 1 if event["state"] == "hydrated" and event["kind"] == "call" else 0
++        longest = max(longest, current)
++    check("fallback without begin_answer(): commits after max_hydrated_tokens", longest == 3,
++          f"longest uncompressed stretch {longest} cache calls with max_hydrated_tokens=4")
++
++
++def test_generation(args, ratio):
++    result = run_rouge(args.standin, args.split, "seedkv", ratio, args.samples, args.work, "t_rouge")
++    check("eval_rouge_final2.py runs with SeedKV", result["num_turns_scored"] > 0,
++          f"{result['num_turns_scored']} turns, ROUGE-L {result['avg_rouge_l_f']:.4f}")
++
++    with Recorder("eval_rouge_final2.py") as refresh:
++        run("eval_rouge_final2.py",
++            ppl_argv(args, "seedkv", ratio, "t_refresh", ["--seedkv-refresh-every", 4, "--max-token-generated", 24]))
++    turns = sum(1 for e in refresh.events if e["kind"] == "finalize")
++    regenerations = sum(c.rehydrations for c in refresh.caches)
++    check("refresh_every: extra regenerations during the answer",
++          regenerations > turns - len(refresh.caches), f"{regenerations} regenerations in {turns} turns")
++
++
++def test_options(args, ratio):
++    """Retain-only ablation and the PyramidKVCache-matched schedule."""
++    with Recorder("eval_ppl_final.py") as retain:
++        run("eval_ppl_final.py", ppl_argv(args, "seedkv", ratio, "t_retain", ["--seedkv-no-regenerate"]))
++    check("ablation --seedkv-no-regenerate: no regeneration, no seed",
++          sum(c.rehydrations for c in retain.caches) == 0 and all(c.charge == 0 for c in retain.caches)
++          and all(e["state"] == "compressed" for e in retain.events))
++    events = mark_first_calls(retain.events)
++    layers = len(events[0]["sizes"])
++    over = sum(1 for e, b in zip(events, nominal_budgets(events, float(ratio), layers)) if sum(e["sizes"]) > b)
++    check("ablation --seedkv-no-regenerate: within L*(C + appended)", over == 0, f"{len(events)} cache calls")
++
++    with Recorder("eval_ppl_final.py") as matched:
++        run("eval_ppl_final.py", ppl_argv(args, "seedkv", ratio, "t_matched",
++                                          ["--seedkv-allocation", "pyramidkv", "--seedkv-no-regenerate",
++                                           "--seedkv-no-seed-charge"]))
++    with Recorder("eval_ppl_final.py") as pyramid:
++        run("eval_ppl_final.py", ppl_argv(args, "pyramidkv", ratio, "t_pyr_matched"))
++    first_a = [e["sizes"] for e in mark_first_calls(matched.events) if e["first"]]
++    first_b = [e["sizes"] for e in mark_first_calls(pyramid.events) if e["first"]]
++    check("--seedkv-allocation pyramidkv: same entries per layer as PyramidKVCache after the prefill",
++          first_a == first_b, f"{first_a[0]} vs {first_b[0]}")
++
++
++def test_determinism(args, ratio):
++    first = run_ppl(args.standin, args.split, "seedkv", ratio, args.samples, args.work, "t_det1")
++    second = run_ppl(args.standin, args.split, "seedkv", ratio, args.samples, args.work, "t_det2")
++    check("deterministic", first["overall_ppl"] == second["overall_ppl"], f"PPL {first['overall_ppl']:.6f}")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--standin", required=True)
++    parser.add_argument("--split", default="mixed")
++    parser.add_argument("--samples", type=int, default=6)
++    parser.add_argument("--work", default=None)
++    args = parser.parse_args()
++    args.work = args.work or tempfile.mkdtemp(prefix="seedkv_test_")
++    harness.set_threads()
++    torch.manual_seed(0)
++
++    test_budget_schedule()
++    test_noop(args)
++    for ratio in (0.9, 0.5):
++        test_structure(args, ratio)
++    test_fallbacks(args, 0.9)
++    test_generation(args, 0.9)
++    test_options(args, 0.9)
++    test_determinism(args, 0.9)
++
++    print(f"\n{'ALL CHECKS PASSED' if not FAILED else 'FAILED: ' + ', '.join(FAILED)}")
++    sys.exit(1 if FAILED else 0)
++
++
++if __name__ == "__main__":
++    main()

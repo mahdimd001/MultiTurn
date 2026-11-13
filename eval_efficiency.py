@@ -130,7 +130,9 @@ ALL_METHODS = [
     "meda",
     "pyramidkv",
     "turn_conditioned_coverage",
-    "turncast_kv"
+    "turncast_kv",
+    "seedkv",
+    "ghostkv",
 ]
 # These policies never read attention maps, so by default they do not pay for
 # materialising them (use --output-attentions always to match the ROUGE run).
@@ -226,6 +228,13 @@ def build_parser():
                         help="TurnCast-KV: path of the trained forecaster (scorer.pt).")
     sweep.add_argument("--turncast-boundary", choices=["window", "forecast"], default="window",
                         help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
+
+    # GhostKV (kv_cache_ghostkv.py): the locator heads found by --ghostkv-calibrate.
+    sweep.add_argument("--ghostkv-locators", type=str, default=None,
+                        help="GhostKV: calibration file with the locator heads of this model.")
+    sweep.add_argument("--ghostkv-context", default="prefix+resident",
+                        choices=["prefix+resident", "prefix", "resident", "none"])
+    sweep.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"])
 
     longctx = parser.add_argument_group("long-context samples (make_long_context.py)")
     longctx.add_argument(
@@ -882,6 +891,9 @@ class Benchmark:
             coverage_alpha_auto=getattr(args, "coverage_alpha_auto", False),
             turncast_scorer=getattr(args, "turncast_scorer", None),
             turncast_boundary=getattr(args, "turncast_boundary", "window"),
+            ghostkv_locators=getattr(args, "ghostkv_locators", None),
+            ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
+            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "all"),
 
 
         )
@@ -1148,6 +1160,12 @@ class Benchmark:
                         _, user_ids = self.turn_segment_ids(question)
                         if hasattr(state.kv_cache, "register_question"):
                             state.kv_cache.register_question(question)
+                        # SeedKV regenerates the prefill KV here (timed as part of TTFT).
+                        if hasattr(state.kv_cache, "prepare_turn"):
+                            with torch.no_grad():
+                                state.past_key_values = state.kv_cache.prepare_turn(
+                                    state.past_key_values, state.logical_len
+                                )
                         user_tokens = len(user_ids)
                         input_tokens += user_tokens
                         self.feed(state, user_ids, decode_attentions, tracker)

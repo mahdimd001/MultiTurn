@@ -22,17 +22,13 @@ source /lustre/hdd/LAS/jannesar-lab/msamani/pythonenv_elasticcache/bin/activate
 
 echo "======================================================================"
 echo "Running: Ratios=0.9 | Context Lengths=native"
-python eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengt
-hs native --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
+python /lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengths native --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
 
 echo "Running: Ratios=0.9 | Context Lengths=2048"
-python eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengt
-hs 2048 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
+python /lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengths 2048 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
 
 echo "Running: Ratios=0.9 | Context Lengths=4096"
-python eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengt
-hs 4096 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
+python /lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengths 4096 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
 
 echo "Running: Ratios=0.9 | Context Lengths=8192"
-python eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengt
-hs 8192 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
+python /lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/eval_efficiency.py --methods full local_cache h2o elastic_cache meda pyramidkv turncast_kv  tgv_kv  --ratios 0.9 --context-lengths 8192 --gen-tokens 512 --num-turns 3 --turncast-scorer turncast_data/turncast_scorer.pt
