@@ -230,9 +230,9 @@ def build_parser():
                         help="TurnCast-KV at turn boundaries: PyramidKV's window rule (default) or the forecaster.")
 
     # GhostKV (kv_cache_ghostkv.py): the locator heads found by --ghostkv-calibrate.
-    sweep.add_argument("--ghostkv-locators", type=str, default=None,
+    sweep.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
                         help="GhostKV: calibration file with the locator heads of this model.")
-    sweep.add_argument("--ghostkv-context", default="prefix+resident",
+    sweep.add_argument("--ghostkv-context", default="resident",
                         choices=["prefix+resident", "prefix", "resident", "none"])
     sweep.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"])
 
@@ -891,7 +891,7 @@ class Benchmark:
             coverage_alpha_auto=getattr(args, "coverage_alpha_auto", False),
             turncast_scorer=getattr(args, "turncast_scorer", None),
             turncast_boundary=getattr(args, "turncast_boundary", "window"),
-            ghostkv_locators=getattr(args, "ghostkv_locators", None),
+            ghostkv_locators=getattr(args, "ghostkv_locators", "./locators_llava15_7b.pt"),
             ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
             ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "all"),
 

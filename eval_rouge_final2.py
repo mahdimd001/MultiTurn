@@ -1443,7 +1443,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         type=str,
-        default="pyramidkv",
+        default="ghostkv",
         choices=[
             "turn_conditioned_layerwise_merge",
             "turn_conditioned_layerwise_eviction",
@@ -1485,7 +1485,7 @@ if __name__ == "__main__":
                         help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
 
     # GhostKV (kv_cache_ghostkv.py): regenerate only the image patches a step needs and lacks.
-    parser.add_argument("--ghostkv-locators", type=str, default=None,
+    parser.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
                         help="GhostKV: calibration file with the locator heads (made by --ghostkv-calibrate).")
     parser.add_argument("--ghostkv-calibrate", type=str, default=None,
                         help="GhostKV: run with the full cache and write the locator-head scores to this file.")
@@ -1513,7 +1513,7 @@ if __name__ == "__main__":
                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
                         help="GhostKV: a fault pages the top missing patches that hold this share of the missing attention.")
-    parser.add_argument("--ghostkv-context", default="prefix+resident",
+    parser.add_argument("--ghostkv-context", default="resident",
                         choices=["prefix+resident", "prefix", "resident", "none"],
                         help="GhostKV: what a regenerated patch can attend to.")
     parser.add_argument("--ghostkv-no-paging", action="store_true",

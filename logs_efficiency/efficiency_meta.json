@@ -2,11 +2,11 @@
   "argv": [
     "/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/eval_efficiency.py",
     "--methods",
-    "seedkv",
+    "ghostkv",
     "--ratios",
     "0.9",
     "--context-lengths",
-    "2048",
+    "native",
     "--gen-tokens",
     "512",
     "--num-turns",
@@ -25,13 +25,13 @@
     "load_4bit": false,
     "image_aspect_ratio": "pad",
     "methods": [
-      "seedkv"
+      "ghostkv"
     ],
     "ratios": [
       0.9
     ],
     "context_lengths": [
-      2048
+      "native"
     ],
     "gen_tokens": 512,
     "stop_at_eos": false,
@@ -41,6 +41,9 @@
     "warmup": 1,
     "turncast_scorer": "turncast_data/turncast_scorer.pt",
     "turncast_boundary": "window",
+    "ghostkv_locators": "./locators_llava15_7b.pt",
+    "ghostkv_context": "resident",
+    "ghostkv_fault_on": "all",
     "long_context_dir": null,
     "regenerate_long_context": false,
     "filler_file": null,
@@ -68,7 +71,7 @@
   "loader_context_length": 2048,
   "image_tokens": 576,
   "data_files": {
-    "2048": "./ConvBench/long_context/convbench_ctx2048.json"
+    "native": "./ConvBench/convbench.json"
   },
   "device": "cuda:0",
   "device_name": "NVIDIA A100 80GB PCIe",
@@ -76,5 +79,5 @@
   "transformers": "4.31.0",
   "python": "3.10.10",
   "host": "nova22-gpu-5",
-  "started": "2026-11-12 15:17:16"
+  "started": "2026-11-13 15:51:03"
 }
