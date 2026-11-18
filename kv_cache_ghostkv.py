@@ -42,8 +42,10 @@ here, minus the seed and the ghost keys (both charged in KV entries).  The
 cache is compressed after the Turn-1 prefill and at every turn boundary with
 PyramidKV's rule (every head keeps its own entries).  A page fault does not
 grow the cache: each head overwrites its coldest entries with the patches it
-is missing (old recent-window entries only when nothing colder is left; never
-the attention sink or a token of the current turn).  At most ``page_slots``
+is missing.  By default (``victims="image"``) only image entries are
+overwritten, so paging never displaces text; ``victims="any"`` goes on to text
+and then to old recent-window entries when a head has no image entry left.
+The attention sink and the tokens of the current turn are never overwritten.  At most ``page_slots``
 paged patches are protected at a time, the ones in highest recent demand; the
 others are overwritten first.  KV + seed + ghost keys therefore never exceeds
 L * (C(length at last boundary) + tokens appended since): no transient peak.
@@ -56,8 +58,13 @@ original.  ``context`` chooses what it does see.
 
 Interface: the same as the other caches (``attach_model``, ``__call__``,
 ``begin_answer``, ``finalize_turn``); no evaluator change is needed.  Page
-faults happen on single-token forwards (decoding and, in this repo's
-evaluators, later-turn questions).
+faults happen on single-token forwards: while answering (default,
+``fault_on="answer"``) or also while a later-turn question is fed token by
+token (``fault_on="all"``).
+
+Layout: the image block (one or several images, contiguous) may sit anywhere
+in the Turn-1 prompt.  With the image first (mm_layout.py) the text in front
+of it is the short system prompt, so a fault recomputes a few dozen tokens.
 """
 
 import functools
@@ -144,8 +151,11 @@ class GhostKVCache(SeedKVCache):
         page_frac=0.3,
         demand_decay=0.9,
         image_weight=1.0,
-        fault_on="all",
-        max_faults=0,
+        fault_on="answer",
+        victims="image",
+        detect_every=1,
+        detect_tokens=32,
+        max_faults=2,
         context="prefix+resident",
         paging=True,
         calibrate=None,
@@ -179,6 +189,11 @@ class GhostKVCache(SeedKVCache):
         if fault_on not in {"all", "answer"}:
             raise ValueError("fault_on must be 'all' or 'answer'")
         self.fault_on = fault_on
+        if victims not in {"image", "any"}:
+            raise ValueError("victims must be 'image' or 'any'")
+        self.victims = victims                    # what a paged-in patch may overwrite
+        self.detect_tokens = int(detect_tokens)       # look for faults in the first n answer tokens (0: all)
+        self.detect_every = max(1, int(detect_every))   # look for faults on every n-th token of a turn
         self.use_prefix = "prefix" in context
         self.use_resident = "resident" in context
         self._page_hooks = []
@@ -213,6 +228,10 @@ class GhostKVCache(SeedKVCache):
         self._calib_kwargs = None
         self._calib_step = 0
         self._step_past = None
+        self._step_index = 0
+        self._answer_steps = 0
+        self._skip_step = False
+        self._layer_ghost = {}         # layer -> stacked ghost keys and per-head constants
         self._faulted = False
         self._inflight = {}            # layer -> fix, applied inside the running forward
         self._late = {}                # layer -> fix, applied after the forward
@@ -229,6 +248,8 @@ class GhostKVCache(SeedKVCache):
                       "relevance_answer": None, "peak": None, "peak_sharpness": 0.0, "steps": 0}
         self._paged = set()
         self._demand = None
+        self._step_index = 0
+        self._answer_steps = 0
 
     # ------------------------------------------------------------------
     # Hooks
@@ -263,18 +284,28 @@ class GhostKVCache(SeedKVCache):
         self._step_past = kwargs.get("past_key_values")
         self._faulted = False
         self._inflight = {}
-        if self._demand is not None:
-            self._demand = self._demand * self.demand_decay
+        # Paging is over for this turn once its fault budget is spent or the answer is
+        # past its first ``detect_tokens`` tokens: from then on a step costs what it
+        # costs any other cache.
+        if self._answer_begun:
+            self._answer_steps += 1
+        done = (self.max_faults and self._turn["faults"] >= self.max_faults) or (
+            self.detect_tokens and self._answer_steps > self.detect_tokens)
+        self._skip_step = bool(done or self._step_index % self.detect_every)
+        self._step_index += 1
         return None
 
     def _attention_pre(self, index, module, args, kwargs):
+        if index not in self._loc_by_layer and not self._inflight:
+            return None                                   # the common case: nothing to do in this layer
         if self._busy or self.state != "compressed" or self._step_past is None:
             return None
         hidden = kwargs.get("hidden_states")
         past = kwargs.get("past_key_value")
         if hidden is None or past is None or hidden.shape[1] != 1 or kwargs.get("position_ids") is None:
             return None
-        if index in self._loc_by_layer and not self._faulted:
+        if (index in self._loc_by_layer and not self._faulted and not self._skip_step
+                and (self._answer_begun or self.fault_on == "all")):
             self._detect(index, module, hidden, past, kwargs.get("position_ids"))
         fix = self._inflight.get(index)
         if fix is None:
@@ -345,6 +376,21 @@ class GhostKVCache(SeedKVCache):
             ghost = past_key_values[layer][0][0, head // groups, self.image_start: self.image_end]
             self._ghost[(layer, head)] = ghost.to(torch.float16).clone()
         self.ghost_bytes = sum(t.numel() * t.element_size() for t in self._ghost.values())
+        # Per layer, everything the per-token test needs, stacked over the layer's locator heads.
+        self._layer_ghost = {}
+        for layer, heads in self._loc_by_layer.items():
+            key = past_key_values[layer][0]
+            groups = self._layers[layer].self_attn.num_heads // key.shape[1]
+            device = key.device
+            weight = torch.tensor([self._weight[(layer, h)] for h in heads], device=device)
+            limit = torch.tensor([self._threshold[(layer, h)] for h in heads], device=device)
+            self._layer_ghost[layer] = {
+                "heads": torch.tensor(heads, device=device),
+                "kv_heads": torch.tensor([h // groups for h in heads], device=device),
+                # fp16 keys; a view when the model is fp16 (GPU), a cast copy on a fp32 CPU model
+                "keys": torch.stack([self._ghost[(layer, h)] for h in heads]).to(key.dtype),
+                "weight": weight, "floor": weight * limit,
+            }
         if self.charge_seed:
             self.charge += int(math.ceil(self.ghost_bytes / float(entry_bytes)))
 
@@ -368,40 +414,45 @@ class GhostKVCache(SeedKVCache):
             query, _ = apply_rotary_pos_emb(query, query, cos, sin, position_ids)
             key, _ = apply_rotary_pos_emb(key, key, cos, sin, position_ids)
 
-        pos = self._full_pos(layer, length, kv_heads)
+        # All locator heads of this layer at once, no GPU->CPU sync until the one test below.
+        info = self._layer_ghost[layer]
+        kv_index = info["kv_heads"]
+        pos = self._full_pos(layer, length, kv_heads).to(key_cache.device)[kv_index]      # [h, length]
         scale = 1.0 / math.sqrt(dim)
-        slots = max(1, self.page_slots)
-
-        missing_score, relevance, floor = None, None, None
-        for head in self._loc_by_layer[layer]:
-            kv_head = head // groups
-            q = query[0, head, 0].float()
-            is_image = self._image_columns(pos[kv_head])
-            resident = torch.zeros(self.image_len, dtype=torch.bool, device=key_cache.device)
-            resident[pos[kv_head][is_image] - self.image_start] = True
-            real = (key_cache[0, kv_head].float() @ q) * scale
-            real = real.masked_fill(is_image, float("-inf"))                 # image comes from the ghosts
-            own = (key[0, kv_head, 0].float() @ q).view(1) * scale
-            ghost = (self._ghost[(layer, head)].to(q.device).float() @ q) * scale
-            virtual = torch.softmax(torch.cat([real, own, ghost]), dim=0)[-self.image_len:]
-            weight, limit = self._weight[(layer, head)], self._threshold[(layer, head)]
-            virtual = virtual * weight
-            relevance = virtual if relevance is None else torch.maximum(relevance, virtual)
-            missing = virtual.masked_fill(resident, 0.0)
-            # A fault must be worth it: the head looks hard at a few missing patches.
-            if float(missing.topk(min(slots, missing.numel())).values.sum()) >= weight * limit:
-                missing_score = missing if missing_score is None else torch.maximum(missing_score, missing)
-                floor = weight * limit if floor is None else min(floor, weight * limit)
+        slots = max(1, min(self.page_slots, self.image_len))
+        q = query[0, info["heads"], 0]                                                   # [h, d]
+        is_image = self._image_columns(pos)
+        real = torch.bmm(key_cache[0, kv_index], q[:, :, None])[:, :, 0].float() * scale
+        real = real.masked_fill(is_image, float("-inf"))                 # image comes from the ghosts
+        own = (key[0, kv_index, 0] * q).sum(-1, keepdim=True).float() * scale
+        ghost = torch.bmm(info["keys"], q[:, :, None])[:, :, 0].float() * scale
+        virtual = torch.softmax(torch.cat([real, own, ghost], dim=1), dim=1)[:, -self.image_len:]
+        virtual = virtual * info["weight"][:, None]
+        resident = torch.zeros((pos.shape[0], self.image_len + 1), dtype=torch.bool, device=pos.device)
+        resident.scatter_(1, torch.where(is_image, pos - self.image_start, self.image_len), True)
+        missing = virtual.masked_fill(resident[:, : self.image_len], 0.0)
+        # A fault must be worth it: a head looks hard at a few missing patches.
+        triggered = missing.topk(slots, dim=1).values.sum(1) >= info["floor"]
+        relevance = virtual.max(dim=0).values
+        missing_score = (missing * triggered[:, None]).max(dim=0).values
+        floor = torch.where(triggered, info["floor"], torch.full_like(info["floor"], float("inf"))).min()
 
         self._note_relevance(relevance, slots)
-        demand = relevance if self._demand is None else torch.maximum(self._demand.to(relevance.device), relevance)
-        self._demand = demand
-        if missing_score is None or self.page_slots <= 0:
+        if self._demand is None:
+            demand = relevance
+        else:
+            last, old = self._demand
+            demand = torch.maximum(old.to(relevance.device) * self.demand_decay ** (self._step_index - last), relevance)
+        self._demand = (self._step_index, demand)
+        if self.page_slots <= 0:
             return
         if self.fault_on == "answer" and not self._answer_begun:
             return
         if self.max_faults and self._turn["faults"] >= self.max_faults:
             return
+        if not bool(triggered.any()):                    # the only sync of a step without a fault
+            return
+        floor = float(floor)
 
         # Candidates: the missing patches the locator heads look at most.
         top = missing_score.topk(min(slots, missing_score.numel()))
@@ -429,17 +480,21 @@ class GhostKVCache(SeedKVCache):
     SHARPNESS_POWER = 4
 
     def _note_relevance(self, virtual, slots):
-        """Accumulate the relevance map of the turn (virtual: [patches], this step)."""
+        """Accumulate the relevance map of the turn (virtual: [patches], this step).  No sync."""
         turn = self._turn
-        sharp = float(virtual.topk(min(slots, virtual.numel())).values.sum())
+        sharp = virtual.topk(slots).values.sum()
         weighted = virtual * sharp ** self.SHARPNESS_POWER    # tokens that look hard at few patches count more
         turn["steps"] += 1
         turn["relevance"] = weighted if turn["relevance"] is None else turn["relevance"] + weighted
         if self._answer_begun:
             seen = turn["relevance_answer"]
             turn["relevance_answer"] = weighted if seen is None else seen + weighted
-            if sharp > turn["peak_sharpness"]:
+            if turn["peak"] is None:
                 turn["peak_sharpness"], turn["peak"] = sharp, virtual
+            else:
+                better = sharp > turn["peak_sharpness"]
+                turn["peak"] = torch.where(better, virtual, turn["peak"])
+                turn["peak_sharpness"] = torch.maximum(sharp, turn["peak_sharpness"])
 
     # ------------------------------------------------------------------
     # Partial regeneration
@@ -517,7 +572,7 @@ class GhostKVCache(SeedKVCache):
             # have[h, i]: head h holds wanted patch i
             have.append((pos[:, :, None] == wanted_pos.to(pos.device)[None, None, :]).any(dim=1))
         missing_any = torch.stack([~h.all(dim=0) for h in have]).any(dim=0)
-        patches = [p for i, p in enumerate(wanted) if bool(missing_any[i])]
+        patches = [p for p, lacking in zip(wanted, missing_any.tolist()) if lacking]
         if not patches:
             return
 
@@ -538,7 +593,7 @@ class GhostKVCache(SeedKVCache):
             fresh = self._regenerate_patches(patches, context)
         finally:
             self._busy = False
-        where = {patch: i for i, patch in enumerate(patches)}
+        source = missing_any.long().cumsum(0) - 1          # index of a wanted patch among the regenerated
         self.faults += 1
         self._turn["faults"] += 1
         self._turn["paged"].update(patches)
@@ -562,26 +617,34 @@ class GhostKVCache(SeedKVCache):
                 old_window = torch.isfinite(heat) & (heat >= self.WINDOW_HEAT)
                 priority = torch.where(old_window, self.WINDOW_HEAT + used.to(heat.device, heat.dtype), heat)
             priority = priority.masked_fill(torch.isin(pos, protected.to(pos.device)), float("inf"))
-            head_idx, col_idx, src_idx = [], [], []
-            for head in range(heads):
-                todo = [p for i, p in enumerate(wanted) if not bool(have[layer][head, i])]
-                if not todo:
-                    continue
-                order = priority[head].argsort()[: len(todo)]
-                order = order[torch.isfinite(priority[head][order])].tolist()
-                for col, patch in zip(order, todo):
-                    head_idx.append(head)
-                    col_idx.append(col)
-                    src_idx.append(where[patch])
-                    pos[head, col] = patch + self.image_start
-                    heat[head, col] = float("inf")
-            self._heat[layer] = heat
-            if not head_idx:
+            if self.victims == "image":
+                # Paging only moves the image budget around: text is never displaced.
+                priority = priority.masked_fill(~self._image_columns(pos), float("inf"))
+            else:
+                # Image entries first, then text, then the old recent window.
+                text = ~self._image_columns(pos) & (priority < self.WINDOW_HEAT)
+                priority = torch.where(text, priority + self.TEXT_HEAT, priority)
+            # Every head at once: its j-th missing patch goes over its j-th coldest entry.
+            lacks = ~have[layer]                                              # [heads, wanted]
+            if not bool(lacks.any()):
+                self._heat[layer] = heat
                 continue
+            order = priority.argsort(dim=1)[:, : len(wanted)]
+            if order.shape[1] < len(wanted):
+                order = torch.nn.functional.pad(order, (0, len(wanted) - order.shape[1]))
+            rank = (lacks.long().cumsum(dim=1) - 1).clamp(min=0)
+            column = order.gather(1, rank)                                    # [heads, wanted]
+            valid = lacks & torch.isfinite(priority.gather(1, column)) & (rank < priority.shape[1])
+            head_sel, want_sel = valid.nonzero(as_tuple=True)
+            if head_sel.numel() == 0:
+                self._heat[layer] = heat
+                continue
+            col_sel = column[head_sel, want_sel]
+            pos[head_sel, col_sel] = wanted_pos.to(pos.device)[want_sel]
+            heat[head_sel, col_sel] = float("inf")
+            self._heat[layer] = heat
             device = key.device
-            hi = torch.as_tensor(head_idx, device=device)
-            ci = torch.as_tensor(col_idx, device=device)
-            si = torch.as_tensor(src_idx, device=device)
+            hi, ci, si = head_sel.to(device), col_sel.to(device), source.to(pos.device)[want_sel].to(device)
             fix = (hi, ci, fresh[layer][0][0][hi, si], fresh[layer][1][0][hi, si])
             groups = self._layers[layer].self_attn.num_heads // heads
             for block in self._window[layer]:            # the attention history of these entries is void
@@ -621,6 +684,7 @@ class GhostKVCache(SeedKVCache):
     # Budget and compression
     # ------------------------------------------------------------------
     WINDOW_HEAT = 1e6
+    TEXT_HEAT = 1e3
     DEFAULT_FOOTPRINT = 4
 
     def _compress(self, past_key_values, capacity, stage):
@@ -867,6 +931,7 @@ class GhostKVCache(SeedKVCache):
         if past_key_values is None or self.ratio <= 0 or self.state == "init":
             return past_key_values
         self.boundary_logical = int(self.n_logical)
+        self._turn["peak_sharpness"] = float(self._turn["peak_sharpness"])
         self.turn_log.append(self._turn)
         self._save_turn_maps()
         result = self._compress(past_key_values, self._capacity(self.n_logical), "turn_boundary")

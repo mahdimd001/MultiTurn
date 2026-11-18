@@ -30,7 +30,9 @@ METHODS=${METHODS:-"pyramidkv turncast_kv seedkv ghostkv"}
 STAGES=${STAGES:-"calibrate ppl rouge efficiency"}
 SAMPLES_ARG=${SAMPLES:+--eval-samples $SAMPLES}     # default: all conversations
 MAXTOK=${MAXTOK:-512}
-LOCATORS=${LOCATORS:-$ROOT/ghostkv_data/locators_llava15_7b.pt}
+# Image-first layout (mm_layout.py): a locator file made with the old layout
+# (question before the image) is not valid any more, hence the new name.
+LOCATORS=${LOCATORS:-$ROOT/ghostkv_data/locators_llava15_7b_imagefirst.pt}
 CALIB_SAMPLES=${CALIB_SAMPLES:-20}
 # Extra flags for GhostKV only, e.g. "--ghostkv-fault-on answer" (fewer faults),
 # "--seedkv-allocation pyramidkv" (same entries per layer as PyramidKVCache) or
@@ -91,5 +93,6 @@ if [[ " $STAGES " == *" efficiency "* ]]; then
   python eval_efficiency.py \
     --methods full $METHODS \
     --ratios $RATIOS --ghostkv-locators $LOCATORS \
-    --context-lengths native --gen-tokens 64 --num-turns 3
+    --context-lengths native 2048 3584 --long-context-mode images \
+    --gen-tokens 64 --num-turns 3
 fi

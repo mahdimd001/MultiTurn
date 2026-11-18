@@ -1,0 +1,130 @@
+diff --git a/eval_efficiency.py b/eval_efficiency.py
+index 7bdeb0b..2f86da1 100644
+--- a/eval_efficiency.py
++++ b/eval_efficiency.py
+@@ -236,7 +236,8 @@ def build_parser():
+                         choices=["prefix+resident", "prefix", "resident", "none"])
+     sweep.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"])
+     sweep.add_argument("--ghostkv-victims", default="image", choices=["image", "any"])
+-    sweep.add_argument("--ghostkv-max-faults", type=int, default=0)
++    sweep.add_argument("--ghostkv-max-faults", type=int, default=2)
++    sweep.add_argument("--ghostkv-detect-tokens", type=int, default=32)
+     sweep.add_argument("--ghostkv-n-locators", type=int, default=4)
+     sweep.add_argument("--ghostkv-threshold", default="auto")
+ 
+@@ -920,7 +921,8 @@ class Benchmark:
+             ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
+             ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "answer"),
+             ghostkv_victims=getattr(args, "ghostkv_victims", "image"),
+-            ghostkv_max_faults=getattr(args, "ghostkv_max_faults", 0),
++            ghostkv_max_faults=getattr(args, "ghostkv_max_faults", 2),
++            ghostkv_detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
+             ghostkv_n_locators=getattr(args, "ghostkv_n_locators", 4),
+             ghostkv_threshold=getattr(args, "ghostkv_threshold", "auto"),
+ 
+diff --git a/eval_ppl_final.py b/eval_ppl_final.py
+index 52f42b6..307062c 100644
+--- a/eval_ppl_final.py
++++ b/eval_ppl_final.py
+@@ -258,7 +258,8 @@ def build_cache(
+             fault_on=getattr(args, "ghostkv_fault_on", "answer"),
+             victims=getattr(args, "ghostkv_victims", "image"),
+             detect_every=getattr(args, "ghostkv_detect_every", 1),
+-            max_faults=getattr(args, "ghostkv_max_faults", 0),
++            max_faults=getattr(args, "ghostkv_max_faults", 2),
++            detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
+             context=getattr(args, "ghostkv_context", "prefix+resident"),
+             paging=not getattr(args, "ghostkv_no_paging", False),
+             calibrate=getattr(args, "ghostkv_calibrate", None),
+@@ -1157,8 +1158,10 @@ if __name__ == "__main__":
+     parser.add_argument("--ghostkv-victims", default="image", choices=["image", "any"],
+                         help="GhostKV: a paged-in patch overwrites image entries only (default) or, when a head "
+                              "has none left, text and old recent-window entries too.")
+-    parser.add_argument("--ghostkv-max-faults", type=int, default=0,
++    parser.add_argument("--ghostkv-max-faults", type=int, default=2,
+                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
++    parser.add_argument("--ghostkv-detect-tokens", type=int, default=32,
++                        help="GhostKV: look for page faults only in the first n answer tokens of a turn (0 = all).")
+     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
+                         help="GhostKV: a fault pages the top missing patches that hold this share of the missing attention.")
+     parser.add_argument("--ghostkv-context", default="prefix+resident",
+diff --git a/eval_rouge_final2.py b/eval_rouge_final2.py
+index 147aee1..0ce6a23 100644
+--- a/eval_rouge_final2.py
++++ b/eval_rouge_final2.py
+@@ -325,7 +325,8 @@ def build_cache(
+             fault_on=getattr(args, "ghostkv_fault_on", "answer"),
+             victims=getattr(args, "ghostkv_victims", "image"),
+             detect_every=getattr(args, "ghostkv_detect_every", 1),
+-            max_faults=getattr(args, "ghostkv_max_faults", 0),
++            max_faults=getattr(args, "ghostkv_max_faults", 2),
++            detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
+             context=getattr(args, "ghostkv_context", "prefix+resident"),
+             paging=not getattr(args, "ghostkv_no_paging", False),
+             calibrate=getattr(args, "ghostkv_calibrate", None),
+@@ -1513,8 +1514,10 @@ if __name__ == "__main__":
+     parser.add_argument("--ghostkv-victims", default="image", choices=["image", "any"],
+                         help="GhostKV: a paged-in patch overwrites image entries only (default) or, when a head "
+                              "has none left, text and old recent-window entries too.")
+-    parser.add_argument("--ghostkv-max-faults", type=int, default=0,
++    parser.add_argument("--ghostkv-max-faults", type=int, default=2,
+                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
++    parser.add_argument("--ghostkv-detect-tokens", type=int, default=32,
++                        help="GhostKV: look for page faults only in the first n answer tokens of a turn (0 = all).")
+     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
+                         help="GhostKV: a fault pages the top missing patches that hold this share of the missing attention.")
+     parser.add_argument("--ghostkv-context", default="resident",
+diff --git a/kv_cache_ghostkv.py b/kv_cache_ghostkv.py
+index 0b68eb7..5fa621e 100644
+--- a/kv_cache_ghostkv.py
++++ b/kv_cache_ghostkv.py
+@@ -154,7 +154,8 @@ class GhostKVCache(SeedKVCache):
+         fault_on="answer",
+         victims="image",
+         detect_every=1,
+-        max_faults=0,
++        detect_tokens=32,
++        max_faults=2,
+         context="prefix+resident",
+         paging=True,
+         calibrate=None,
+@@ -191,6 +192,7 @@ class GhostKVCache(SeedKVCache):
+         if victims not in {"image", "any"}:
+             raise ValueError("victims must be 'image' or 'any'")
+         self.victims = victims                    # what a paged-in patch may overwrite
++        self.detect_tokens = int(detect_tokens)       # look for faults in the first n answer tokens (0: all)
+         self.detect_every = max(1, int(detect_every))   # look for faults on every n-th token of a turn
+         self.use_prefix = "prefix" in context
+         self.use_resident = "resident" in context
+@@ -227,6 +229,7 @@ class GhostKVCache(SeedKVCache):
+         self._calib_step = 0
+         self._step_past = None
+         self._step_index = 0
++        self._answer_steps = 0
+         self._skip_step = False
+         self._layer_ghost = {}         # layer -> stacked ghost keys and per-head constants
+         self._faulted = False
+@@ -246,6 +249,7 @@ class GhostKVCache(SeedKVCache):
+         self._paged = set()
+         self._demand = None
+         self._step_index = 0
++        self._answer_steps = 0
+ 
+     # ------------------------------------------------------------------
+     # Hooks
+@@ -280,7 +284,14 @@ class GhostKVCache(SeedKVCache):
+         self._step_past = kwargs.get("past_key_values")
+         self._faulted = False
+         self._inflight = {}
+-        self._skip_step = bool(self._step_index % self.detect_every)
++        # Paging is over for this turn once its fault budget is spent or the answer is
++        # past its first ``detect_tokens`` tokens: from then on a step costs what it
++        # costs any other cache.
++        if self._answer_begun:
++            self._answer_steps += 1
++        done = (self.max_faults and self._turn["faults"] >= self.max_faults) or (
++            self.detect_tokens and self._answer_steps > self.detect_tokens)
++        self._skip_step = bool(done or self._step_index % self.detect_every)
+         self._step_index += 1
+         return None
+ 

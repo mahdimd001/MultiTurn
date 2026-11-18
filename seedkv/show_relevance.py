@@ -71,6 +71,7 @@ def main():
         if values is None:
             axis.set_title(title + "\n(no map: no single-token step)", fontsize=8.5, loc="left", color=ink)
             continue
+        values = values[: values.numel() // (1 + len(item.get("extra_images") or []))]   # the item's own image
         side = int(round(values.numel() ** 0.5))
         grid = (values / values.sum().clamp_min(1e-9)).view(side, side).numpy()
         extent = (0, image.size[0], image.size[1], 0)

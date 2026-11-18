@@ -1,9 +1,21 @@
 #!/usr/bin/env python
 """Generate long-context versions of a multi-turn image-dialogue dataset.
 
-For every target length N, each conversation's turn-1 user message gets a
-background passage in front of the question, so that the turn-1 prefill is
-exactly N tokens.  The turn-1 prefill is everything LLaVA processes in the first
+Two ways to make the turn-1 prefill longer (--mode):
+
+  images (default)  more IMAGE tokens: extra images, taken from other
+                    conversations, are placed right after the conversation's
+                    own image.  One image is a fixed number of visual tokens
+                    (576 for LLaVA-1.5), so the prefill cannot hit every N
+                    exactly: the number of images whose prefill is closest to N
+                    is used and the measured length is recorded.  The question
+                    is unchanged and still about the first image.
+  text              more TEXT tokens: a background passage in front of the
+                    question, so that the prefill is exactly N tokens.
+
+The rest of this description is about --mode text.  For every target length N,
+each conversation's turn-1 user message gets a background passage in front of
+the question, so that the turn-1 prefill is exactly N tokens.  The turn-1 prefill is everything LLaVA processes in the first
 forward pass: system prompt, expanded image tokens and text, using the model's
 own tokenizer and conversation template.  Turns 2+ are unchanged; the passage
 stays in the conversation history and KV cache for them.
@@ -37,6 +49,8 @@ import json
 import os
 import random
 import unicodedata
+
+import mm_layout
 
 DEFAULT_HEADER = "Background notes:\n"
 IMAGE_PLACEHOLDER = "<image>"
@@ -110,9 +124,10 @@ def passage_pool(raw_items, filler_file=None):
     return pool
 
 
-def long_context_path(out_dir, data_path, target):
+def long_context_path(out_dir, data_path, target, mode="text"):
     stem = os.path.splitext(os.path.basename(data_path))[0] if data_path else "synthetic"
-    return os.path.join(out_dir, f"{stem}_ctx{int(target)}.json")
+    tag = "img" if mode == "images" else "ctx"
+    return os.path.join(out_dir, f"{stem}_{tag}{int(target)}.json")
 
 
 # --------------------------------------------------------------------------
@@ -123,7 +138,8 @@ def long_context_path(out_dir, data_path, target):
 class PrefillCounter:
     """Counts turn-1 prefill tokens exactly as LLaVA will see them."""
 
-    def __init__(self, tokenizer, template, image_tokens, conv_mode, header=DEFAULT_HEADER):
+    def __init__(self, tokenizer, template, image_tokens, conv_mode, header=DEFAULT_HEADER,
+                 image_position="first"):
         from llava.constants import IMAGE_TOKEN_INDEX
         from llava.mm_utils import tokenizer_image_token
 
@@ -132,6 +148,7 @@ class PrefillCounter:
         self.image_tokens = int(image_tokens)
         self.conv_mode = conv_mode
         self.header = header
+        self.image_position = image_position
         self._image_index = IMAGE_TOKEN_INDEX
         self._tokenize = tokenizer_image_token
         # Prompts longer than model_max_length (2048 in LLaVA's tokenizer config)
@@ -145,9 +162,8 @@ class PrefillCounter:
             return original
         return self.header + passage + padding + "\n\n" + original
 
-    def count(self, question):
-        if IMAGE_PLACEHOLDER not in question:  # same rule as eval_rogue_final.py
-            question = question + "\n" + IMAGE_PLACEHOLDER
+    def count(self, question, n_images=1):
+        question = mm_layout.first_turn_question(question, n_images, self.image_position)  # as the evaluators
         conv = self.template.copy()
         conv.append_message(conv.roles[0], question)
         conv.append_message(conv.roles[1], None)
@@ -235,8 +251,68 @@ def _fit_cut(counter, original, pool_ids, target):
     return max(under, key=lambda v: v[1]) if under else min(seen.values(), key=lambda v: v[1])
 
 
-def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=None, log=print):
-    """Return (items, report) where every item's turn-1 prefill is `target` tokens."""
+def build_image_context_dataset(raw_items, counter, target, seed=0, log=print):
+    """Return (items, report): extra images after each item's own image so that
+    the turn-1 prefill is as close to `target` tokens as whole images allow."""
+    names = []
+    for item in raw_items:
+        name = item.get("image") or item.get("imagename")
+        if name and name not in names:
+            names.append(name)
+    output, too_long = [], []
+    for index, item in enumerate(raw_items):
+        turns = turns_of(item)
+        if not turns:
+            continue
+        original = turns[0].get("question", "")
+        own = item.get("image") or item.get("imagename")
+        native = counter.count(original, 1)
+        if native > target:
+            too_long.append(index)
+            continue
+        extra = int(round((target - native) / float(counter.image_tokens)))
+        others = [name for name in names if name != own]
+        random.Random(seed * 1000003 + index).shuffle(others)
+        if own is None:                      # synthetic items: the evaluator draws noise images
+            chosen = [None] * extra
+        elif not others:
+            chosen = [own] * extra
+        else:
+            chosen = [others[i % len(others)] for i in range(extra)]
+        measured = counter.count(original, 1 + extra)
+        new_item = {k: v for k, v in item.items() if k not in ("turns", "question", "answer")}
+        new_item["turns"] = turns
+        new_item["extra_images"] = chosen
+        new_item["long_context"] = {
+            "mode": "images",
+            "image_position": counter.image_position,
+            "requested_prefill_tokens": int(target),
+            "target_prefill_tokens": int(measured),
+            "prefill_tokens": int(measured),
+            "native_prefill_tokens": int(native),
+            "added_tokens": int(measured - native),
+            "images": 1 + extra,
+            "image_tokens": counter.image_tokens,
+            "conv_mode": counter.conv_mode,
+            "seed": seed,
+            "original_question": original,
+        }
+        output.append(new_item)
+    lengths = sorted({item["long_context"]["prefill_tokens"] for item in output})
+    report = {"target": int(target), "written": len(output),
+              "skipped_native_longer_than_target": len(too_long), "not_exact": len(output),
+              "prefill_tokens": lengths}
+    if output:
+        images = sorted({item["long_context"]["images"] for item in output})
+        log(f"  ctx={target}: {images} image(s) per conversation, prefill {lengths[0]}..{lengths[-1]} tokens")
+    return output, report
+
+
+def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=None, log=print, mode="text"):
+    """Return (items, report) where every item's turn-1 prefill is `target` tokens
+    (mode "text") or as close to it as whole images allow (mode "images")."""
+    if mode == "images":
+        return build_image_context_dataset(raw_items, counter, target, seed=seed, log=log)
     pool = passage_pool(raw_items, filler_file)
     source = os.path.basename(filler_file) if filler_file else "reference answers of other conversations"
     output, too_long, inexact = [], [], []
@@ -257,6 +333,9 @@ def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=N
         new_item = {k: v for k, v in item.items() if k not in ("turns", "question", "answer")}
         new_item["turns"] = turns
         new_item["long_context"] = {
+            "mode": "text",
+            "image_position": counter.image_position,
+            "requested_prefill_tokens": int(target),
             "target_prefill_tokens": int(target),
             "prefill_tokens": int(measured),
             "native_prefill_tokens": int(native),
@@ -314,6 +393,9 @@ def main(argv=None):
     parser.add_argument("--filler-file", default=None)
     parser.add_argument("--header", default=DEFAULT_HEADER)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--mode", default="images", choices=["images", "text"],
+                        help="Lengthen the context with extra images (default) or with a text passage.")
+    mm_layout.add_arguments(parser)
     args = parser.parse_args(argv)
 
     from transformers import AutoTokenizer
@@ -322,7 +404,8 @@ def main(argv=None):
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)  # as llava's builder
     conv_mode = args.conv_mode or infer_conv_mode(get_model_name_from_path(args.model_path))
-    counter = PrefillCounter(tokenizer, conv_templates[conv_mode], args.image_tokens, conv_mode, args.header)
+    counter = PrefillCounter(tokenizer, conv_templates[conv_mode], args.image_tokens, conv_mode, args.header,
+                             image_position=args.image_position)
 
     with open(args.data_path, "r") as handle:
         raw_items = json.load(handle)
@@ -332,9 +415,9 @@ def main(argv=None):
     print(f"conv_mode={conv_mode} image_tokens={args.image_tokens} items={len(raw_items)}")
     for target in args.context_lengths:
         items, report = build_long_context_dataset(
-            raw_items, counter, target, seed=args.seed, filler_file=args.filler_file
+            raw_items, counter, target, seed=args.seed, filler_file=args.filler_file, mode=args.mode
         )
-        path = long_context_path(out_dir, args.data_path, target)
+        path = long_context_path(out_dir, args.data_path, target, args.mode)
         write_dataset(path, items)
         print(f"ctx={target}: wrote {report['written']} conversations -> {path}")
 

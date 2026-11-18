@@ -47,7 +47,7 @@ Conversation-level totals (e2e, overall throughput, overall peak) are also kept.
 Context length (--context-lengths)
   native  The dataset as-is, identical to the ROUGE run.
   N       A long-context version of the dataset in which every conversation's
-          turn-1 prefill (system prompt + 576 image tokens + text) is exactly N
+          turn-1 prefill (system prompt + image tokens + text) is about N
           tokens.  The samples are GENERATED FIRST as dataset files by
           make_long_context.py (same tokenizer and template as the model), saved
           as <long-context-dir>/<data>_ctxN.json, and then sent to the model like
@@ -232,9 +232,14 @@ def build_parser():
     # GhostKV (kv_cache_ghostkv.py): the locator heads found by --ghostkv-calibrate.
     sweep.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
                         help="GhostKV: calibration file with the locator heads of this model.")
-    sweep.add_argument("--ghostkv-context", default="resident",
+    sweep.add_argument("--ghostkv-context", default="prefix+resident",
                         choices=["prefix+resident", "prefix", "resident", "none"])
-    sweep.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"])
+    sweep.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"])
+    sweep.add_argument("--ghostkv-victims", default="image", choices=["image", "any"])
+    sweep.add_argument("--ghostkv-max-faults", type=int, default=2)
+    sweep.add_argument("--ghostkv-detect-tokens", type=int, default=32)
+    sweep.add_argument("--ghostkv-n-locators", type=int, default=4)
+    sweep.add_argument("--ghostkv-threshold", default="auto")
 
     longctx = parser.add_argument_group("long-context samples (make_long_context.py)")
     longctx.add_argument(
@@ -243,6 +248,20 @@ def build_parser():
         default=None,
         help="Where <data>_ctxN.json files are read from / written to. "
         "Default: <data-path directory>/long_context.",
+    )
+    longctx.add_argument(
+        "--long-context-mode",
+        default="images",
+        choices=["images", "text"],
+        help="Reach --context-lengths with extra images after the conversation's own image "
+        "(default; whole images, so the measured prefill is the closest reachable length) "
+        "or with a text passage (exact length).",
+    )
+    longctx.add_argument(
+        "--image-position",
+        default="first",
+        choices=["first", "last"],
+        help="Turn-1 layout: image before the question (LLaVA's own layout) or after it.",
     )
     longctx.add_argument(
         "--regenerate-long-context",
@@ -595,6 +614,7 @@ def parse_items(raw_items, source):
         items.append(
             {
                 "image": image,
+                "extra_images": list(raw.get("extra_images") or []),
                 "id": raw.get("id", image),
                 "turns": turns,
                 "index": index,
@@ -780,7 +800,8 @@ class Benchmark:
                     f"--context-lengths {context_length} needs make_long_context.py next to "
                     "eval_efficiency.py (or run with --context-lengths native)."
                 ) from exc
-            path = make_long_context.long_context_path(long_dir, args.data_path, context_length)
+            mode = args.long_context_mode
+            path = make_long_context.long_context_path(long_dir, args.data_path, context_length, mode)
             if os.path.exists(path) and not args.regenerate_long_context:
                 with open(path, "r") as handle:
                     raw = json.load(handle)
@@ -788,24 +809,29 @@ class Benchmark:
                 if meta and (
                     meta.get("image_tokens") != self.image_tokens
                     or meta.get("conv_mode") != args.conv_mode
-                    or meta.get("target_prefill_tokens") != context_length
+                    or meta.get("requested_prefill_tokens", meta.get("target_prefill_tokens")) != context_length
+                    or meta.get("mode", "text") != mode
+                    or meta.get("image_position", "last") != args.image_position
                 ):
                     raise SystemExit(
                         f"{path} was generated for image_tokens={meta.get('image_tokens')}, "
                         f"conv_mode={meta.get('conv_mode')}, target={meta.get('target_prefill_tokens')}; "
-                        f"this model needs {self.image_tokens}/{args.conv_mode}/{context_length}. "
+                        f"mode={meta.get('mode', 'text')}, image_position={meta.get('image_position', 'last')}; "
+                        f"this run needs {self.image_tokens}/{args.conv_mode}/{context_length}/{mode}/"
+                        f"{args.image_position}. "
                         "Pass --regenerate-long-context or a different --long-context-dir."
                     )
                 print(f"ctx={context_length}: using {len(raw)} samples from {path}", flush=True)
             else:
                 if counter is None:
                     counter = make_long_context.PrefillCounter(
-                        self.tokenizer, self.template, self.image_tokens, args.conv_mode
+                        self.tokenizer, self.template, self.image_tokens, args.conv_mode,
+                        image_position=args.image_position,
                     )
                 start = time.perf_counter()
                 raw, report = make_long_context.build_long_context_dataset(
                     self.raw_items, counter, context_length,
-                    seed=args.seed, filler_file=args.filler_file,
+                    seed=args.seed, filler_file=args.filler_file, mode=mode,
                 )
                 make_long_context.write_dataset(path, raw)
                 print(
@@ -833,10 +859,10 @@ class Benchmark:
             return self._encode(stop), self._encode(segment[len(stop) :])
         return [], self._encode(segment)
 
-    def first_turn_ids(self, question):
-        """Turn-1 prompt ids, built exactly like eval_rogue_final.py."""
-        if DEFAULT_IMAGE_TOKEN not in question:
-            question = question + "\n" + DEFAULT_IMAGE_TOKEN
+    def first_turn_ids(self, question, n_images=1):
+        """Turn-1 prompt ids, built exactly like eval_rouge_final2.py (mm_layout.py)."""
+        import mm_layout
+        question = mm_layout.first_turn_question(question, n_images, self.args.image_position)
         conv = self.template.copy()
         conv.append_message(conv.roles[0], question)
         conv.append_message(conv.roles[1], None)
@@ -893,19 +919,29 @@ class Benchmark:
             turncast_boundary=getattr(args, "turncast_boundary", "window"),
             ghostkv_locators=getattr(args, "ghostkv_locators", "./locators_llava15_7b.pt"),
             ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
-            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "all"),
+            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "answer"),
+            ghostkv_victims=getattr(args, "ghostkv_victims", "image"),
+            ghostkv_max_faults=getattr(args, "ghostkv_max_faults", 2),
+            ghostkv_detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
+            ghostkv_n_locators=getattr(args, "ghostkv_n_locators", 4),
+            ghostkv_threshold=getattr(args, "ghostkv_threshold", "auto"),
 
 
         )
 
     def load_item_image(self, item):
-        if item["image"] is None:
-            rng = np.random.default_rng(12345)
-            from PIL import Image
+        """The item's images: its own first, then the extra ones of a long-context file."""
+        images = []
+        for number, name in enumerate([item["image"]] + list(item.get("extra_images") or [])):
+            if name is None:
+                rng = np.random.default_rng(12345 + number)
+                from PIL import Image
 
-            pixels = rng.integers(0, 256, size=(336, 336, 3), dtype=np.uint8)
-            return Image.fromarray(pixels, mode="RGB")
-        return load_image(os.path.join(self.args.image_path, item["image"]))
+                pixels = rng.integers(0, 256, size=(336, 336, 3), dtype=np.uint8)
+                images.append(Image.fromarray(pixels, mode="RGB"))
+            else:
+                images.append(load_image(os.path.join(self.args.image_path, name)))
+        return images
 
     # --------------------------------------------------------------- stepping
 
@@ -1013,15 +1049,17 @@ class Benchmark:
                 image_load_s = t_turn_start - t_conversation
 
                 # ---------------- turn 1: preprocessing + prefill + policy
-                image_tensor = process_images([image], self.image_processor, args).to(
-                    self.device, dtype=self.dtype
-                )
-                ids = self.first_turn_ids(questions[0])
+                image_tensor = process_images(image, self.image_processor, args)   # a list of images
+                if isinstance(image_tensor, (list, tuple)):
+                    image_tensor = torch.stack(list(image_tensor))
+                image_tensor = image_tensor.to(self.device, dtype=self.dtype)
+                ids = self.first_turn_ids(questions[0], len(image))
                 input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
                 placeholders = ids.count(IMAGE_TOKEN_INDEX)
                 expected_prefill = len(ids) - placeholders + placeholders * self.image_tokens
                 expected_span = (
-                    (ids.index(IMAGE_TOKEN_INDEX), self.image_tokens) if placeholders else (None, 0)
+                    (ids.index(IMAGE_TOKEN_INDEX), placeholders * self.image_tokens)
+                    if placeholders else (None, 0)
                 )
                 user_lengths = [len(self.turn_segment_ids(q)[1]) for q in questions[1:]]
                 max_logical = (
@@ -1116,7 +1154,7 @@ class Benchmark:
                         f"the sample was generated for {target} (different tokenizer/model?). "
                         "Rows record the measured length; --regenerate-long-context rebuilds.",
                     )
-                if image_token_len and image_token_len != self.image_tokens:
+                if image_token_len and image_token_len != placeholders * self.image_tokens:
                     self.warn_once(
                         "image_tokens",
                         f"image expands to {image_token_len} tokens, not {self.image_tokens}.",

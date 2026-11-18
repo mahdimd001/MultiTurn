@@ -78,6 +78,7 @@ from tgv_kv_legacy_nova import (
 )
 
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
+import mm_layout
 from llava.conversation import SeparatorStyle, conv_templates
 from llava.mm_utils import (
     get_model_name_from_path,
@@ -192,21 +193,15 @@ def infer_actual_image_span(input_ids, past_key_values, k_seq_dim=2):
     The start of the expanded visual block is the position of the image
     placeholder in the original token sequence.
     """
-    image_positions = (input_ids[0] == IMAGE_TOKEN_INDEX).nonzero(as_tuple=True)[0]
+    # One or more images, as ONE contiguous block of visual tokens (mm_layout.py).
+    image_start, placeholders = mm_layout.image_block(input_ids[0].tolist(), IMAGE_TOKEN_INDEX)
 
-    if image_positions.numel() == 0:
+    if placeholders == 0:
         return None, 0
 
-    if image_positions.numel() != 1:
-        raise ValueError(
-            "This evaluator currently expects exactly one image per item. "
-            f"Found {image_positions.numel()} image placeholders."
-        )
-
     expanded_seq_len = past_key_values[0][0].size(k_seq_dim)
-    text_token_count = input_ids.shape[1] - image_positions.numel()
+    text_token_count = input_ids.shape[1] - placeholders
     image_token_len = int(expanded_seq_len - text_token_count)
-    image_start = int(image_positions[0].item())
 
     if image_token_len <= 0:
         raise RuntimeError(
@@ -327,8 +322,11 @@ def build_cache(
             cover=getattr(args, "ghostkv_cover", 0.9),
             demand_decay=getattr(args, "ghostkv_demand_decay", 0.9),
             image_weight=getattr(args, "ghostkv_image_weight", 1.0),
-            fault_on=getattr(args, "ghostkv_fault_on", "all"),
-            max_faults=getattr(args, "ghostkv_max_faults", 0),
+            fault_on=getattr(args, "ghostkv_fault_on", "answer"),
+            victims=getattr(args, "ghostkv_victims", "image"),
+            detect_every=getattr(args, "ghostkv_detect_every", 1),
+            max_faults=getattr(args, "ghostkv_max_faults", 2),
+            detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
             context=getattr(args, "ghostkv_context", "prefix+resident"),
             paging=not getattr(args, "ghostkv_no_paging", False),
             calibrate=getattr(args, "ghostkv_calibrate", None),
@@ -913,9 +911,12 @@ def main(args):
         # ----------------
         # Prepare the image
         # ----------------
-        image_path = os.path.join(args.image_path, item["image"])
-        image = load_image(image_path)
-        image_tensor = process_images([image], image_processor, args)
+        # The item's own image first, then any extra images (long-context files).
+        image_names = mm_layout.image_files(item)
+        images = [load_image(os.path.join(args.image_path, name)) for name in image_names]
+        image_tensor = process_images(images, image_processor, args)
+        if isinstance(image_tensor, (list, tuple)):
+            image_tensor = torch.stack(list(image_tensor))
         image_tensor = image_tensor.to(model.device, dtype=getattr(model, "dtype", next(model.parameters()).dtype))
 
         # ---------------------------------------------------------
@@ -949,8 +950,10 @@ def main(args):
             # 1. Add the current USER turn to the logical conversation.
             #    The image placeholder is present ONLY in the first turn.
             # ============================================================
-            if turn_id == 0 and DEFAULT_IMAGE_TOKEN not in question:
-                question = question + "\n" + DEFAULT_IMAGE_TOKEN
+            if turn_id == 0:
+                question = mm_layout.first_turn_question(
+                    question, len(image_names), getattr(args, "image_position", "first")
+                )
 
             conv.append_message(conv.roles[0], question)
             conv.append_message(conv.roles[1], None)
@@ -960,18 +963,14 @@ def main(args):
             )
 
             if turn_id == 0:
-                image_positions = (
-                    base_ids[0] == IMAGE_TOKEN_INDEX
-                ).nonzero(as_tuple=True)[0]
-
-                if image_positions.numel() != 1:
+                image_start, image_count = mm_layout.image_block(
+                    base_ids[0].tolist(), IMAGE_TOKEN_INDEX
+                )
+                if image_count != len(image_names):
                     raise ValueError(
-                        f"Expected exactly one image placeholder, "
-                        f"found {image_positions.numel()}"
+                        f"Expected {len(image_names)} image placeholder(s), found {image_count}"
                     )
-
-                image_start = int(image_positions[0].item())
-                image_token_len = image_token_len_from_tower
+                image_token_len = image_token_len_from_tower * image_count
 
                 # The cache must exist before the model runs so each layer can immediately
                 # deliver its attention statistics.
@@ -1485,6 +1484,7 @@ if __name__ == "__main__":
                         help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
 
     # GhostKV (kv_cache_ghostkv.py): regenerate only the image patches a step needs and lacks.
+    mm_layout.add_arguments(parser)
     parser.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
                         help="GhostKV: calibration file with the locator heads (made by --ghostkv-calibrate).")
     parser.add_argument("--ghostkv-calibrate", type=str, default=None,
@@ -1507,10 +1507,17 @@ if __name__ == "__main__":
     parser.add_argument("--ghostkv-image-weight", type=float, default=1.0,
                         help="GhostKV: weight of image entries when the cache is compressed (< 1 keeps more text; "
                              "the image can be paged back, text cannot).")
-    parser.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"],
-                        help="GhostKV: page in while reading the question and answering (all) or only while answering.")
-    parser.add_argument("--ghostkv-max-faults", type=int, default=0,
+    parser.add_argument("--ghostkv-detect-every", type=int, default=1,
+                        help="GhostKV: look for page faults on every n-th token of a turn (1 = every token).")
+    parser.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"],
+                        help="GhostKV: page in only while answering (default) or also while a later-turn question is read.")
+    parser.add_argument("--ghostkv-victims", default="image", choices=["image", "any"],
+                        help="GhostKV: a paged-in patch overwrites image entries only (default) or, when a head "
+                             "has none left, text and old recent-window entries too.")
+    parser.add_argument("--ghostkv-max-faults", type=int, default=2,
                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
+    parser.add_argument("--ghostkv-detect-tokens", type=int, default=32,
+                        help="GhostKV: look for page faults only in the first n answer tokens of a turn (0 = all).")
     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
                         help="GhostKV: a fault pages the top missing patches that hold this share of the missing attention.")
     parser.add_argument("--ghostkv-context", default="resident",

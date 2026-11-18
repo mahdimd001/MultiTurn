@@ -1,5 +1,9 @@
 # GhostKV: regenerate only the image patches the question needs
 
+> November 2026 update: the evaluators now put the image first and long
+> contexts are made of extra images. Read `README_image_first.md` first; the
+> results below were measured with the old layout (`--image-position last`).
+
 `kv_cache_ghostkv.py` · `--method ghostkv`
 
 SeedKV keeps a seed of the image and, for every new question, regenerates the
@@ -142,6 +146,14 @@ the text is read from the cache instead: 6 tokens per turn, perplexity 1.040
 instead of 1.037. With `--ghostkv-fault-on answer`: 1.4 faults per turn, same
 perplexity. On a GPU each fault costs about one decoding step; I could not
 measure that here.
+
+### Speed
+
+The per-token test is one batched matrix product per locator layer with a
+single GPU-to-CPU sync, and a fault is handled for all heads of a layer at
+once. For the lowest latency use `--ghostkv-context resident` (a fault then
+recomputes only the missing patches, not the text before the image) and
+`--ghostkv-fault-on answer`. Timings were not measured here (CPU only).
 
 ## Results
 
@@ -287,9 +299,11 @@ first two rows show.
 | `--ghostkv-ghost-share` | 0.02 | ... as long as their keys fit in this share of the budget (at least 1). |
 | `--ghostkv-threshold` | `auto` | Missing attention that triggers a fault. `auto`: half the head's 90th-percentile level from calibration. Lower = more faults. |
 | `--ghostkv-page-slots` / `--ghostkv-page-frac` | auto / 0.3 | Protected paged patches: 30% of the layer budget, at least one "look" of the best head. |
-| `--ghostkv-fault-on` | `all` | `answer`: no faults while the question is read (cheaper). |
+| `--ghostkv-fault-on` | `answer` | `all`: also fault while a later-turn question is read. |
+| `--ghostkv-victims` | `image` | A paged-in patch overwrites image entries only. `any`: text and old recent-window entries too when a head has no image entry left. |
 | `--ghostkv-context` | `prefix+resident` | What a regenerated patch sees. `resident` skips recomputing the text (cheapest). |
 | `--ghostkv-max-faults` | 0 | Cap on regenerations per turn (0 = none). |
+| `--ghostkv-detect-every` | 1 | Look for faults on every n-th token. Faster, but on the stand-in it costs quality (perplexity 1.04 -> 1.22 at 2). |
 | `--ghostkv-demand-decay` | 0.9 | How fast an old request fades. |
 | `--ghostkv-cover` | 0.9 | A fault pages the patches holding this share of the missing attention. |
 | `--ghostkv-image-weight` | 1.0 | Below 1 keeps more text at compression. No clear gain on the stand-in. |

@@ -289,6 +289,10 @@ class SeedKVCache:
                 f"SeedKV: prefill embeddings have shape {tuple(embeds.shape)}, "
                 f"expected [1, {self.n0}, hidden]")
         features = self._raw_features
+        if (features is not None and features.dim() == 3 and features.shape[0] > 1
+                and features.shape[0] * features.shape[1] == self.image_len):
+            # Several images (one contiguous visual block): one row of features.
+            features = features.reshape(1, self.image_len, features.shape[-1])
         image_end = None if self.image_start is None else self.image_start + self.image_len
         use_features = (
             self.seed_mode != "embeds"
@@ -332,7 +336,15 @@ class SeedKVCache:
     def _text_ids_seed(self, embeds, image_end):
         """Token ids of the text before/after the image, if they give back its embeddings."""
         ids = self._raw_ids
-        if len(ids) != 2 or any(x.dim() != 1 or x.is_floating_point() for x in ids):
+        if any(x.dim() != 1 or x.is_floating_point() for x in ids):
+            return None
+        ids = [x for x in ids if x.numel() > 0]          # nothing between two adjacent images
+        suffix_len = self.n0 - image_end
+        if len(ids) == 1 and ids[0].numel() == self.image_start + suffix_len:
+            ids = [ids[0][: self.image_start], ids[0][self.image_start:]]     # embedded in one call
+        elif len(ids) == 1 and suffix_len == 0:
+            ids = [ids[0], ids[0][:0]]
+        if len(ids) != 2:
             return None
         if ids[0].numel() != self.image_start or ids[1].numel() != self.n0 - image_end:
             return None

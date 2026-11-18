@@ -1,0 +1,1850 @@
+diff --git a/eval_efficiency.py b/eval_efficiency.py
+index 8d7c863..7bdeb0b 100644
+--- a/eval_efficiency.py
++++ b/eval_efficiency.py
+@@ -47,7 +47,7 @@ Conversation-level totals (e2e, overall throughput, overall peak) are also kept.
+ Context length (--context-lengths)
+   native  The dataset as-is, identical to the ROUGE run.
+   N       A long-context version of the dataset in which every conversation's
+-          turn-1 prefill (system prompt + 576 image tokens + text) is exactly N
++          turn-1 prefill (system prompt + image tokens + text) is about N
+           tokens.  The samples are GENERATED FIRST as dataset files by
+           make_long_context.py (same tokenizer and template as the model), saved
+           as <long-context-dir>/<data>_ctxN.json, and then sent to the model like
+@@ -232,9 +232,13 @@ def build_parser():
+     # GhostKV (kv_cache_ghostkv.py): the locator heads found by --ghostkv-calibrate.
+     sweep.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
+                         help="GhostKV: calibration file with the locator heads of this model.")
+-    sweep.add_argument("--ghostkv-context", default="resident",
++    sweep.add_argument("--ghostkv-context", default="prefix+resident",
+                         choices=["prefix+resident", "prefix", "resident", "none"])
+-    sweep.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"])
++    sweep.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"])
++    sweep.add_argument("--ghostkv-victims", default="image", choices=["image", "any"])
++    sweep.add_argument("--ghostkv-max-faults", type=int, default=0)
++    sweep.add_argument("--ghostkv-n-locators", type=int, default=4)
++    sweep.add_argument("--ghostkv-threshold", default="auto")
+ 
+     longctx = parser.add_argument_group("long-context samples (make_long_context.py)")
+     longctx.add_argument(
+@@ -244,6 +248,20 @@ def build_parser():
+         help="Where <data>_ctxN.json files are read from / written to. "
+         "Default: <data-path directory>/long_context.",
+     )
++    longctx.add_argument(
++        "--long-context-mode",
++        default="images",
++        choices=["images", "text"],
++        help="Reach --context-lengths with extra images after the conversation's own image "
++        "(default; whole images, so the measured prefill is the closest reachable length) "
++        "or with a text passage (exact length).",
++    )
++    longctx.add_argument(
++        "--image-position",
++        default="first",
++        choices=["first", "last"],
++        help="Turn-1 layout: image before the question (LLaVA's own layout) or after it.",
++    )
+     longctx.add_argument(
+         "--regenerate-long-context",
+         action="store_true",
+@@ -595,6 +613,7 @@ def parse_items(raw_items, source):
+         items.append(
+             {
+                 "image": image,
++                "extra_images": list(raw.get("extra_images") or []),
+                 "id": raw.get("id", image),
+                 "turns": turns,
+                 "index": index,
+@@ -780,7 +799,8 @@ class Benchmark:
+                     f"--context-lengths {context_length} needs make_long_context.py next to "
+                     "eval_efficiency.py (or run with --context-lengths native)."
+                 ) from exc
+-            path = make_long_context.long_context_path(long_dir, args.data_path, context_length)
++            mode = args.long_context_mode
++            path = make_long_context.long_context_path(long_dir, args.data_path, context_length, mode)
+             if os.path.exists(path) and not args.regenerate_long_context:
+                 with open(path, "r") as handle:
+                     raw = json.load(handle)
+@@ -788,24 +808,29 @@ class Benchmark:
+                 if meta and (
+                     meta.get("image_tokens") != self.image_tokens
+                     or meta.get("conv_mode") != args.conv_mode
+-                    or meta.get("target_prefill_tokens") != context_length
++                    or meta.get("requested_prefill_tokens", meta.get("target_prefill_tokens")) != context_length
++                    or meta.get("mode", "text") != mode
++                    or meta.get("image_position", "last") != args.image_position
+                 ):
+                     raise SystemExit(
+                         f"{path} was generated for image_tokens={meta.get('image_tokens')}, "
+                         f"conv_mode={meta.get('conv_mode')}, target={meta.get('target_prefill_tokens')}; "
+-                        f"this model needs {self.image_tokens}/{args.conv_mode}/{context_length}. "
++                        f"mode={meta.get('mode', 'text')}, image_position={meta.get('image_position', 'last')}; "
++                        f"this run needs {self.image_tokens}/{args.conv_mode}/{context_length}/{mode}/"
++                        f"{args.image_position}. "
+                         "Pass --regenerate-long-context or a different --long-context-dir."
+                     )
+                 print(f"ctx={context_length}: using {len(raw)} samples from {path}", flush=True)
+             else:
+                 if counter is None:
+                     counter = make_long_context.PrefillCounter(
+-                        self.tokenizer, self.template, self.image_tokens, args.conv_mode
++                        self.tokenizer, self.template, self.image_tokens, args.conv_mode,
++                        image_position=args.image_position,
+                     )
+                 start = time.perf_counter()
+                 raw, report = make_long_context.build_long_context_dataset(
+                     self.raw_items, counter, context_length,
+-                    seed=args.seed, filler_file=args.filler_file,
++                    seed=args.seed, filler_file=args.filler_file, mode=mode,
+                 )
+                 make_long_context.write_dataset(path, raw)
+                 print(
+@@ -833,10 +858,10 @@ class Benchmark:
+             return self._encode(stop), self._encode(segment[len(stop) :])
+         return [], self._encode(segment)
+ 
+-    def first_turn_ids(self, question):
+-        """Turn-1 prompt ids, built exactly like eval_rogue_final.py."""
+-        if DEFAULT_IMAGE_TOKEN not in question:
+-            question = question + "\n" + DEFAULT_IMAGE_TOKEN
++    def first_turn_ids(self, question, n_images=1):
++        """Turn-1 prompt ids, built exactly like eval_rouge_final2.py (mm_layout.py)."""
++        import mm_layout
++        question = mm_layout.first_turn_question(question, n_images, self.args.image_position)
+         conv = self.template.copy()
+         conv.append_message(conv.roles[0], question)
+         conv.append_message(conv.roles[1], None)
+@@ -893,19 +918,28 @@ class Benchmark:
+             turncast_boundary=getattr(args, "turncast_boundary", "window"),
+             ghostkv_locators=getattr(args, "ghostkv_locators", "./locators_llava15_7b.pt"),
+             ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
+-            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "all"),
++            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "answer"),
++            ghostkv_victims=getattr(args, "ghostkv_victims", "image"),
++            ghostkv_max_faults=getattr(args, "ghostkv_max_faults", 0),
++            ghostkv_n_locators=getattr(args, "ghostkv_n_locators", 4),
++            ghostkv_threshold=getattr(args, "ghostkv_threshold", "auto"),
+ 
+ 
+         )
+ 
+     def load_item_image(self, item):
+-        if item["image"] is None:
+-            rng = np.random.default_rng(12345)
+-            from PIL import Image
+-
+-            pixels = rng.integers(0, 256, size=(336, 336, 3), dtype=np.uint8)
+-            return Image.fromarray(pixels, mode="RGB")
+-        return load_image(os.path.join(self.args.image_path, item["image"]))
++        """The item's images: its own first, then the extra ones of a long-context file."""
++        images = []
++        for number, name in enumerate([item["image"]] + list(item.get("extra_images") or [])):
++            if name is None:
++                rng = np.random.default_rng(12345 + number)
++                from PIL import Image
++
++                pixels = rng.integers(0, 256, size=(336, 336, 3), dtype=np.uint8)
++                images.append(Image.fromarray(pixels, mode="RGB"))
++            else:
++                images.append(load_image(os.path.join(self.args.image_path, name)))
++        return images
+ 
+     # --------------------------------------------------------------- stepping
+ 
+@@ -1013,15 +1047,17 @@ class Benchmark:
+                 image_load_s = t_turn_start - t_conversation
+ 
+                 # ---------------- turn 1: preprocessing + prefill + policy
+-                image_tensor = process_images([image], self.image_processor, args).to(
+-                    self.device, dtype=self.dtype
+-                )
+-                ids = self.first_turn_ids(questions[0])
++                image_tensor = process_images(image, self.image_processor, args)   # a list of images
++                if isinstance(image_tensor, (list, tuple)):
++                    image_tensor = torch.stack(list(image_tensor))
++                image_tensor = image_tensor.to(self.device, dtype=self.dtype)
++                ids = self.first_turn_ids(questions[0], len(image))
+                 input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
+                 placeholders = ids.count(IMAGE_TOKEN_INDEX)
+                 expected_prefill = len(ids) - placeholders + placeholders * self.image_tokens
+                 expected_span = (
+-                    (ids.index(IMAGE_TOKEN_INDEX), self.image_tokens) if placeholders else (None, 0)
++                    (ids.index(IMAGE_TOKEN_INDEX), placeholders * self.image_tokens)
++                    if placeholders else (None, 0)
+                 )
+                 user_lengths = [len(self.turn_segment_ids(q)[1]) for q in questions[1:]]
+                 max_logical = (
+@@ -1116,7 +1152,7 @@ class Benchmark:
+                         f"the sample was generated for {target} (different tokenizer/model?). "
+                         "Rows record the measured length; --regenerate-long-context rebuilds.",
+                     )
+-                if image_token_len and image_token_len != self.image_tokens:
++                if image_token_len and image_token_len != placeholders * self.image_tokens:
+                     self.warn_once(
+                         "image_tokens",
+                         f"image expands to {image_token_len} tokens, not {self.image_tokens}.",
+diff --git a/eval_ppl_final.py b/eval_ppl_final.py
+index d3872c4..52f42b6 100644
+--- a/eval_ppl_final.py
++++ b/eval_ppl_final.py
+@@ -61,6 +61,7 @@ from tgv_kv_legacy_nova import (
+ )
+ 
+ from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
++import mm_layout
+ from llava.conversation import conv_templates
+ from llava.mm_utils import (
+     get_model_name_from_path,
+@@ -142,21 +143,15 @@ def infer_actual_image_span(input_ids, past_key_values, k_seq_dim=2):
+     The start of the expanded visual block is the position of the image
+     placeholder in the original token sequence.
+     """
+-    image_positions = (input_ids[0] == IMAGE_TOKEN_INDEX).nonzero(as_tuple=True)[0]
++    # One or more images, as ONE contiguous block of visual tokens (mm_layout.py).
++    image_start, placeholders = mm_layout.image_block(input_ids[0].tolist(), IMAGE_TOKEN_INDEX)
+ 
+-    if image_positions.numel() == 0:
++    if placeholders == 0:
+         return None, 0
+ 
+-    if image_positions.numel() != 1:
+-        raise ValueError(
+-            "This evaluator currently expects exactly one image per item. "
+-            f"Found {image_positions.numel()} image placeholders."
+-        )
+-
+     expanded_seq_len = past_key_values[0][0].size(k_seq_dim)
+-    text_token_count = input_ids.shape[1] - image_positions.numel()
++    text_token_count = input_ids.shape[1] - placeholders
+     image_token_len = int(expanded_seq_len - text_token_count)
+-    image_start = int(image_positions[0].item())
+ 
+     if image_token_len <= 0:
+         raise RuntimeError(
+@@ -260,7 +255,9 @@ def build_cache(
+             cover=getattr(args, "ghostkv_cover", 0.9),
+             demand_decay=getattr(args, "ghostkv_demand_decay", 0.9),
+             image_weight=getattr(args, "ghostkv_image_weight", 1.0),
+-            fault_on=getattr(args, "ghostkv_fault_on", "all"),
++            fault_on=getattr(args, "ghostkv_fault_on", "answer"),
++            victims=getattr(args, "ghostkv_victims", "image"),
++            detect_every=getattr(args, "ghostkv_detect_every", 1),
+             max_faults=getattr(args, "ghostkv_max_faults", 0),
+             context=getattr(args, "ghostkv_context", "prefix+resident"),
+             paging=not getattr(args, "ghostkv_no_paging", False),
+@@ -661,9 +658,12 @@ def main(args):
+         # ----------------
+         # Prepare the image
+         # ----------------
+-        image_path = os.path.join(args.image_path, item["image"])
+-        image = load_image(image_path)
+-        image_tensor = process_images([image], image_processor, args)
++        # The item's own image first, then any extra images (long-context files).
++        image_names = mm_layout.image_files(item)
++        images = [load_image(os.path.join(args.image_path, name)) for name in image_names]
++        image_tensor = process_images(images, image_processor, args)
++        if isinstance(image_tensor, (list, tuple)):
++            image_tensor = torch.stack(list(image_tensor))
+         image_tensor = image_tensor.to(model.device, dtype=getattr(model, "dtype", next(model.parameters()).dtype))
+ 
+         # ---------------------------------------------------------
+@@ -696,8 +696,9 @@ def main(args):
+             #    The image placeholder is present ONLY in the first turn.
+             # ============================================================
+             if turn_id == 0:
+-                if DEFAULT_IMAGE_TOKEN not in question:
+-                    question = question + "\n" + DEFAULT_IMAGE_TOKEN
++                question = mm_layout.first_turn_question(
++                    question, len(image_names), getattr(args, "image_position", "first")
++                )
+ 
+                 conv.append_message(conv.roles[0], question)
+                 conv.append_message(conv.roles[1], None)
+@@ -706,18 +707,14 @@ def main(args):
+                     base_prompt, tokenizer, model.device
+                 )
+ 
+-                image_positions = (
+-                    base_ids[0] == IMAGE_TOKEN_INDEX
+-                ).nonzero(as_tuple=True)[0]
+-
+-                if image_positions.numel() != 1:
++                image_start, image_count = mm_layout.image_block(
++                    base_ids[0].tolist(), IMAGE_TOKEN_INDEX
++                )
++                if image_count != len(image_names):
+                     raise ValueError(
+-                        f"Expected exactly one image placeholder, "
+-                        f"found {image_positions.numel()}"
++                        f"Expected {len(image_names)} image placeholder(s), found {image_count}"
+                     )
+-
+-                image_start = int(image_positions[0].item())
+-                image_token_len = image_token_len_from_tower
++                image_token_len = image_token_len_from_tower * image_count
+ 
+                 # The cache must exist before the model runs so each layer can immediately
+                 # deliver its attention statistics.
+@@ -1130,6 +1127,7 @@ if __name__ == "__main__":
+                         help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
+ 
+     # GhostKV (kv_cache_ghostkv.py): regenerate only the image patches a step needs and lacks.
++    mm_layout.add_arguments(parser)
+     parser.add_argument("--ghostkv-locators", type=str, default=None,
+                         help="GhostKV: calibration file with the locator heads (made by --ghostkv-calibrate).")
+     parser.add_argument("--ghostkv-calibrate", type=str, default=None,
+@@ -1152,8 +1150,13 @@ if __name__ == "__main__":
+     parser.add_argument("--ghostkv-image-weight", type=float, default=1.0,
+                         help="GhostKV: weight of image entries when the cache is compressed (< 1 keeps more text; "
+                              "the image can be paged back, text cannot).")
+-    parser.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"],
+-                        help="GhostKV: page in while reading the question and answering (all) or only while answering.")
++    parser.add_argument("--ghostkv-detect-every", type=int, default=1,
++                        help="GhostKV: look for page faults on every n-th token of a turn (1 = every token).")
++    parser.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"],
++                        help="GhostKV: page in only while answering (default) or also while a later-turn question is read.")
++    parser.add_argument("--ghostkv-victims", default="image", choices=["image", "any"],
++                        help="GhostKV: a paged-in patch overwrites image entries only (default) or, when a head "
++                             "has none left, text and old recent-window entries too.")
+     parser.add_argument("--ghostkv-max-faults", type=int, default=0,
+                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
+     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
+diff --git a/eval_rouge_final2.py b/eval_rouge_final2.py
+index 7cd4d1a..147aee1 100644
+--- a/eval_rouge_final2.py
++++ b/eval_rouge_final2.py
+@@ -78,6 +78,7 @@ from tgv_kv_legacy_nova import (
+ )
+ 
+ from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
++import mm_layout
+ from llava.conversation import SeparatorStyle, conv_templates
+ from llava.mm_utils import (
+     get_model_name_from_path,
+@@ -192,21 +193,15 @@ def infer_actual_image_span(input_ids, past_key_values, k_seq_dim=2):
+     The start of the expanded visual block is the position of the image
+     placeholder in the original token sequence.
+     """
+-    image_positions = (input_ids[0] == IMAGE_TOKEN_INDEX).nonzero(as_tuple=True)[0]
++    # One or more images, as ONE contiguous block of visual tokens (mm_layout.py).
++    image_start, placeholders = mm_layout.image_block(input_ids[0].tolist(), IMAGE_TOKEN_INDEX)
+ 
+-    if image_positions.numel() == 0:
++    if placeholders == 0:
+         return None, 0
+ 
+-    if image_positions.numel() != 1:
+-        raise ValueError(
+-            "This evaluator currently expects exactly one image per item. "
+-            f"Found {image_positions.numel()} image placeholders."
+-        )
+-
+     expanded_seq_len = past_key_values[0][0].size(k_seq_dim)
+-    text_token_count = input_ids.shape[1] - image_positions.numel()
++    text_token_count = input_ids.shape[1] - placeholders
+     image_token_len = int(expanded_seq_len - text_token_count)
+-    image_start = int(image_positions[0].item())
+ 
+     if image_token_len <= 0:
+         raise RuntimeError(
+@@ -327,7 +322,9 @@ def build_cache(
+             cover=getattr(args, "ghostkv_cover", 0.9),
+             demand_decay=getattr(args, "ghostkv_demand_decay", 0.9),
+             image_weight=getattr(args, "ghostkv_image_weight", 1.0),
+-            fault_on=getattr(args, "ghostkv_fault_on", "all"),
++            fault_on=getattr(args, "ghostkv_fault_on", "answer"),
++            victims=getattr(args, "ghostkv_victims", "image"),
++            detect_every=getattr(args, "ghostkv_detect_every", 1),
+             max_faults=getattr(args, "ghostkv_max_faults", 0),
+             context=getattr(args, "ghostkv_context", "prefix+resident"),
+             paging=not getattr(args, "ghostkv_no_paging", False),
+@@ -913,9 +910,12 @@ def main(args):
+         # ----------------
+         # Prepare the image
+         # ----------------
+-        image_path = os.path.join(args.image_path, item["image"])
+-        image = load_image(image_path)
+-        image_tensor = process_images([image], image_processor, args)
++        # The item's own image first, then any extra images (long-context files).
++        image_names = mm_layout.image_files(item)
++        images = [load_image(os.path.join(args.image_path, name)) for name in image_names]
++        image_tensor = process_images(images, image_processor, args)
++        if isinstance(image_tensor, (list, tuple)):
++            image_tensor = torch.stack(list(image_tensor))
+         image_tensor = image_tensor.to(model.device, dtype=getattr(model, "dtype", next(model.parameters()).dtype))
+ 
+         # ---------------------------------------------------------
+@@ -949,8 +949,10 @@ def main(args):
+             # 1. Add the current USER turn to the logical conversation.
+             #    The image placeholder is present ONLY in the first turn.
+             # ============================================================
+-            if turn_id == 0 and DEFAULT_IMAGE_TOKEN not in question:
+-                question = question + "\n" + DEFAULT_IMAGE_TOKEN
++            if turn_id == 0:
++                question = mm_layout.first_turn_question(
++                    question, len(image_names), getattr(args, "image_position", "first")
++                )
+ 
+             conv.append_message(conv.roles[0], question)
+             conv.append_message(conv.roles[1], None)
+@@ -960,18 +962,14 @@ def main(args):
+             )
+ 
+             if turn_id == 0:
+-                image_positions = (
+-                    base_ids[0] == IMAGE_TOKEN_INDEX
+-                ).nonzero(as_tuple=True)[0]
+-
+-                if image_positions.numel() != 1:
++                image_start, image_count = mm_layout.image_block(
++                    base_ids[0].tolist(), IMAGE_TOKEN_INDEX
++                )
++                if image_count != len(image_names):
+                     raise ValueError(
+-                        f"Expected exactly one image placeholder, "
+-                        f"found {image_positions.numel()}"
++                        f"Expected {len(image_names)} image placeholder(s), found {image_count}"
+                     )
+-
+-                image_start = int(image_positions[0].item())
+-                image_token_len = image_token_len_from_tower
++                image_token_len = image_token_len_from_tower * image_count
+ 
+                 # The cache must exist before the model runs so each layer can immediately
+                 # deliver its attention statistics.
+@@ -1485,6 +1483,7 @@ if __name__ == "__main__":
+                         help="SeedKV ablation: same scoring and budgets, but retain-only (no regeneration).")
+ 
+     # GhostKV (kv_cache_ghostkv.py): regenerate only the image patches a step needs and lacks.
++    mm_layout.add_arguments(parser)
+     parser.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
+                         help="GhostKV: calibration file with the locator heads (made by --ghostkv-calibrate).")
+     parser.add_argument("--ghostkv-calibrate", type=str, default=None,
+@@ -1507,8 +1506,13 @@ if __name__ == "__main__":
+     parser.add_argument("--ghostkv-image-weight", type=float, default=1.0,
+                         help="GhostKV: weight of image entries when the cache is compressed (< 1 keeps more text; "
+                              "the image can be paged back, text cannot).")
+-    parser.add_argument("--ghostkv-fault-on", default="all", choices=["all", "answer"],
+-                        help="GhostKV: page in while reading the question and answering (all) or only while answering.")
++    parser.add_argument("--ghostkv-detect-every", type=int, default=1,
++                        help="GhostKV: look for page faults on every n-th token of a turn (1 = every token).")
++    parser.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"],
++                        help="GhostKV: page in only while answering (default) or also while a later-turn question is read.")
++    parser.add_argument("--ghostkv-victims", default="image", choices=["image", "any"],
++                        help="GhostKV: a paged-in patch overwrites image entries only (default) or, when a head "
++                             "has none left, text and old recent-window entries too.")
+     parser.add_argument("--ghostkv-max-faults", type=int, default=0,
+                         help="GhostKV: at most this many regenerations per turn (0 = no limit).")
+     parser.add_argument("--ghostkv-cover", type=float, default=0.9,
+diff --git a/kv_cache_ghostkv.py b/kv_cache_ghostkv.py
+index 2085cd4..0b68eb7 100644
+--- a/kv_cache_ghostkv.py
++++ b/kv_cache_ghostkv.py
+@@ -42,8 +42,10 @@ here, minus the seed and the ghost keys (both charged in KV entries).  The
+ cache is compressed after the Turn-1 prefill and at every turn boundary with
+ PyramidKV's rule (every head keeps its own entries).  A page fault does not
+ grow the cache: each head overwrites its coldest entries with the patches it
+-is missing (old recent-window entries only when nothing colder is left; never
+-the attention sink or a token of the current turn).  At most ``page_slots``
++is missing.  By default (``victims="image"``) only image entries are
++overwritten, so paging never displaces text; ``victims="any"`` goes on to text
++and then to old recent-window entries when a head has no image entry left.
++The attention sink and the tokens of the current turn are never overwritten.  At most ``page_slots``
+ paged patches are protected at a time, the ones in highest recent demand; the
+ others are overwritten first.  KV + seed + ghost keys therefore never exceeds
+ L * (C(length at last boundary) + tokens appended since): no transient peak.
+@@ -56,8 +58,13 @@ original.  ``context`` chooses what it does see.
+ 
+ Interface: the same as the other caches (``attach_model``, ``__call__``,
+ ``begin_answer``, ``finalize_turn``); no evaluator change is needed.  Page
+-faults happen on single-token forwards (decoding and, in this repo's
+-evaluators, later-turn questions).
++faults happen on single-token forwards: while answering (default,
++``fault_on="answer"``) or also while a later-turn question is fed token by
++token (``fault_on="all"``).
++
++Layout: the image block (one or several images, contiguous) may sit anywhere
++in the Turn-1 prompt.  With the image first (mm_layout.py) the text in front
++of it is the short system prompt, so a fault recomputes a few dozen tokens.
+ """
+ 
+ import functools
+@@ -144,7 +151,9 @@ class GhostKVCache(SeedKVCache):
+         page_frac=0.3,
+         demand_decay=0.9,
+         image_weight=1.0,
+-        fault_on="all",
++        fault_on="answer",
++        victims="image",
++        detect_every=1,
+         max_faults=0,
+         context="prefix+resident",
+         paging=True,
+@@ -179,6 +188,10 @@ class GhostKVCache(SeedKVCache):
+         if fault_on not in {"all", "answer"}:
+             raise ValueError("fault_on must be 'all' or 'answer'")
+         self.fault_on = fault_on
++        if victims not in {"image", "any"}:
++            raise ValueError("victims must be 'image' or 'any'")
++        self.victims = victims                    # what a paged-in patch may overwrite
++        self.detect_every = max(1, int(detect_every))   # look for faults on every n-th token of a turn
+         self.use_prefix = "prefix" in context
+         self.use_resident = "resident" in context
+         self._page_hooks = []
+@@ -213,6 +226,9 @@ class GhostKVCache(SeedKVCache):
+         self._calib_kwargs = None
+         self._calib_step = 0
+         self._step_past = None
++        self._step_index = 0
++        self._skip_step = False
++        self._layer_ghost = {}         # layer -> stacked ghost keys and per-head constants
+         self._faulted = False
+         self._inflight = {}            # layer -> fix, applied inside the running forward
+         self._late = {}                # layer -> fix, applied after the forward
+@@ -229,6 +245,7 @@ class GhostKVCache(SeedKVCache):
+                       "relevance_answer": None, "peak": None, "peak_sharpness": 0.0, "steps": 0}
+         self._paged = set()
+         self._demand = None
++        self._step_index = 0
+ 
+     # ------------------------------------------------------------------
+     # Hooks
+@@ -263,18 +280,21 @@ class GhostKVCache(SeedKVCache):
+         self._step_past = kwargs.get("past_key_values")
+         self._faulted = False
+         self._inflight = {}
+-        if self._demand is not None:
+-            self._demand = self._demand * self.demand_decay
++        self._skip_step = bool(self._step_index % self.detect_every)
++        self._step_index += 1
+         return None
+ 
+     def _attention_pre(self, index, module, args, kwargs):
++        if index not in self._loc_by_layer and not self._inflight:
++            return None                                   # the common case: nothing to do in this layer
+         if self._busy or self.state != "compressed" or self._step_past is None:
+             return None
+         hidden = kwargs.get("hidden_states")
+         past = kwargs.get("past_key_value")
+         if hidden is None or past is None or hidden.shape[1] != 1 or kwargs.get("position_ids") is None:
+             return None
+-        if index in self._loc_by_layer and not self._faulted:
++        if (index in self._loc_by_layer and not self._faulted and not self._skip_step
++                and (self._answer_begun or self.fault_on == "all")):
+             self._detect(index, module, hidden, past, kwargs.get("position_ids"))
+         fix = self._inflight.get(index)
+         if fix is None:
+@@ -345,6 +365,21 @@ class GhostKVCache(SeedKVCache):
+             ghost = past_key_values[layer][0][0, head // groups, self.image_start: self.image_end]
+             self._ghost[(layer, head)] = ghost.to(torch.float16).clone()
+         self.ghost_bytes = sum(t.numel() * t.element_size() for t in self._ghost.values())
++        # Per layer, everything the per-token test needs, stacked over the layer's locator heads.
++        self._layer_ghost = {}
++        for layer, heads in self._loc_by_layer.items():
++            key = past_key_values[layer][0]
++            groups = self._layers[layer].self_attn.num_heads // key.shape[1]
++            device = key.device
++            weight = torch.tensor([self._weight[(layer, h)] for h in heads], device=device)
++            limit = torch.tensor([self._threshold[(layer, h)] for h in heads], device=device)
++            self._layer_ghost[layer] = {
++                "heads": torch.tensor(heads, device=device),
++                "kv_heads": torch.tensor([h // groups for h in heads], device=device),
++                # fp16 keys; a view when the model is fp16 (GPU), a cast copy on a fp32 CPU model
++                "keys": torch.stack([self._ghost[(layer, h)] for h in heads]).to(key.dtype),
++                "weight": weight, "floor": weight * limit,
++            }
+         if self.charge_seed:
+             self.charge += int(math.ceil(self.ghost_bytes / float(entry_bytes)))
+ 
+@@ -368,40 +403,45 @@ class GhostKVCache(SeedKVCache):
+             query, _ = apply_rotary_pos_emb(query, query, cos, sin, position_ids)
+             key, _ = apply_rotary_pos_emb(key, key, cos, sin, position_ids)
+ 
+-        pos = self._full_pos(layer, length, kv_heads)
++        # All locator heads of this layer at once, no GPU->CPU sync until the one test below.
++        info = self._layer_ghost[layer]
++        kv_index = info["kv_heads"]
++        pos = self._full_pos(layer, length, kv_heads).to(key_cache.device)[kv_index]      # [h, length]
+         scale = 1.0 / math.sqrt(dim)
+-        slots = max(1, self.page_slots)
+-
+-        missing_score, relevance, floor = None, None, None
+-        for head in self._loc_by_layer[layer]:
+-            kv_head = head // groups
+-            q = query[0, head, 0].float()
+-            is_image = self._image_columns(pos[kv_head])
+-            resident = torch.zeros(self.image_len, dtype=torch.bool, device=key_cache.device)
+-            resident[pos[kv_head][is_image] - self.image_start] = True
+-            real = (key_cache[0, kv_head].float() @ q) * scale
+-            real = real.masked_fill(is_image, float("-inf"))                 # image comes from the ghosts
+-            own = (key[0, kv_head, 0].float() @ q).view(1) * scale
+-            ghost = (self._ghost[(layer, head)].to(q.device).float() @ q) * scale
+-            virtual = torch.softmax(torch.cat([real, own, ghost]), dim=0)[-self.image_len:]
+-            weight, limit = self._weight[(layer, head)], self._threshold[(layer, head)]
+-            virtual = virtual * weight
+-            relevance = virtual if relevance is None else torch.maximum(relevance, virtual)
+-            missing = virtual.masked_fill(resident, 0.0)
+-            # A fault must be worth it: the head looks hard at a few missing patches.
+-            if float(missing.topk(min(slots, missing.numel())).values.sum()) >= weight * limit:
+-                missing_score = missing if missing_score is None else torch.maximum(missing_score, missing)
+-                floor = weight * limit if floor is None else min(floor, weight * limit)
++        slots = max(1, min(self.page_slots, self.image_len))
++        q = query[0, info["heads"], 0]                                                   # [h, d]
++        is_image = self._image_columns(pos)
++        real = torch.bmm(key_cache[0, kv_index], q[:, :, None])[:, :, 0].float() * scale
++        real = real.masked_fill(is_image, float("-inf"))                 # image comes from the ghosts
++        own = (key[0, kv_index, 0] * q).sum(-1, keepdim=True).float() * scale
++        ghost = torch.bmm(info["keys"], q[:, :, None])[:, :, 0].float() * scale
++        virtual = torch.softmax(torch.cat([real, own, ghost], dim=1), dim=1)[:, -self.image_len:]
++        virtual = virtual * info["weight"][:, None]
++        resident = torch.zeros((pos.shape[0], self.image_len + 1), dtype=torch.bool, device=pos.device)
++        resident.scatter_(1, torch.where(is_image, pos - self.image_start, self.image_len), True)
++        missing = virtual.masked_fill(resident[:, : self.image_len], 0.0)
++        # A fault must be worth it: a head looks hard at a few missing patches.
++        triggered = missing.topk(slots, dim=1).values.sum(1) >= info["floor"]
++        relevance = virtual.max(dim=0).values
++        missing_score = (missing * triggered[:, None]).max(dim=0).values
++        floor = torch.where(triggered, info["floor"], torch.full_like(info["floor"], float("inf"))).min()
+ 
+         self._note_relevance(relevance, slots)
+-        demand = relevance if self._demand is None else torch.maximum(self._demand.to(relevance.device), relevance)
+-        self._demand = demand
+-        if missing_score is None or self.page_slots <= 0:
++        if self._demand is None:
++            demand = relevance
++        else:
++            last, old = self._demand
++            demand = torch.maximum(old.to(relevance.device) * self.demand_decay ** (self._step_index - last), relevance)
++        self._demand = (self._step_index, demand)
++        if self.page_slots <= 0:
+             return
+         if self.fault_on == "answer" and not self._answer_begun:
+             return
+         if self.max_faults and self._turn["faults"] >= self.max_faults:
+             return
++        if not bool(triggered.any()):                    # the only sync of a step without a fault
++            return
++        floor = float(floor)
+ 
+         # Candidates: the missing patches the locator heads look at most.
+         top = missing_score.topk(min(slots, missing_score.numel()))
+@@ -429,17 +469,21 @@ class GhostKVCache(SeedKVCache):
+     SHARPNESS_POWER = 4
+ 
+     def _note_relevance(self, virtual, slots):
+-        """Accumulate the relevance map of the turn (virtual: [patches], this step)."""
++        """Accumulate the relevance map of the turn (virtual: [patches], this step).  No sync."""
+         turn = self._turn
+-        sharp = float(virtual.topk(min(slots, virtual.numel())).values.sum())
++        sharp = virtual.topk(slots).values.sum()
+         weighted = virtual * sharp ** self.SHARPNESS_POWER    # tokens that look hard at few patches count more
+         turn["steps"] += 1
+         turn["relevance"] = weighted if turn["relevance"] is None else turn["relevance"] + weighted
+         if self._answer_begun:
+             seen = turn["relevance_answer"]
+             turn["relevance_answer"] = weighted if seen is None else seen + weighted
+-            if sharp > turn["peak_sharpness"]:
++            if turn["peak"] is None:
+                 turn["peak_sharpness"], turn["peak"] = sharp, virtual
++            else:
++                better = sharp > turn["peak_sharpness"]
++                turn["peak"] = torch.where(better, virtual, turn["peak"])
++                turn["peak_sharpness"] = torch.maximum(sharp, turn["peak_sharpness"])
+ 
+     # ------------------------------------------------------------------
+     # Partial regeneration
+@@ -517,7 +561,7 @@ class GhostKVCache(SeedKVCache):
+             # have[h, i]: head h holds wanted patch i
+             have.append((pos[:, :, None] == wanted_pos.to(pos.device)[None, None, :]).any(dim=1))
+         missing_any = torch.stack([~h.all(dim=0) for h in have]).any(dim=0)
+-        patches = [p for i, p in enumerate(wanted) if bool(missing_any[i])]
++        patches = [p for p, lacking in zip(wanted, missing_any.tolist()) if lacking]
+         if not patches:
+             return
+ 
+@@ -538,7 +582,7 @@ class GhostKVCache(SeedKVCache):
+             fresh = self._regenerate_patches(patches, context)
+         finally:
+             self._busy = False
+-        where = {patch: i for i, patch in enumerate(patches)}
++        source = missing_any.long().cumsum(0) - 1          # index of a wanted patch among the regenerated
+         self.faults += 1
+         self._turn["faults"] += 1
+         self._turn["paged"].update(patches)
+@@ -562,26 +606,34 @@ class GhostKVCache(SeedKVCache):
+                 old_window = torch.isfinite(heat) & (heat >= self.WINDOW_HEAT)
+                 priority = torch.where(old_window, self.WINDOW_HEAT + used.to(heat.device, heat.dtype), heat)
+             priority = priority.masked_fill(torch.isin(pos, protected.to(pos.device)), float("inf"))
+-            head_idx, col_idx, src_idx = [], [], []
+-            for head in range(heads):
+-                todo = [p for i, p in enumerate(wanted) if not bool(have[layer][head, i])]
+-                if not todo:
+-                    continue
+-                order = priority[head].argsort()[: len(todo)]
+-                order = order[torch.isfinite(priority[head][order])].tolist()
+-                for col, patch in zip(order, todo):
+-                    head_idx.append(head)
+-                    col_idx.append(col)
+-                    src_idx.append(where[patch])
+-                    pos[head, col] = patch + self.image_start
+-                    heat[head, col] = float("inf")
+-            self._heat[layer] = heat
+-            if not head_idx:
++            if self.victims == "image":
++                # Paging only moves the image budget around: text is never displaced.
++                priority = priority.masked_fill(~self._image_columns(pos), float("inf"))
++            else:
++                # Image entries first, then text, then the old recent window.
++                text = ~self._image_columns(pos) & (priority < self.WINDOW_HEAT)
++                priority = torch.where(text, priority + self.TEXT_HEAT, priority)
++            # Every head at once: its j-th missing patch goes over its j-th coldest entry.
++            lacks = ~have[layer]                                              # [heads, wanted]
++            if not bool(lacks.any()):
++                self._heat[layer] = heat
+                 continue
++            order = priority.argsort(dim=1)[:, : len(wanted)]
++            if order.shape[1] < len(wanted):
++                order = torch.nn.functional.pad(order, (0, len(wanted) - order.shape[1]))
++            rank = (lacks.long().cumsum(dim=1) - 1).clamp(min=0)
++            column = order.gather(1, rank)                                    # [heads, wanted]
++            valid = lacks & torch.isfinite(priority.gather(1, column)) & (rank < priority.shape[1])
++            head_sel, want_sel = valid.nonzero(as_tuple=True)
++            if head_sel.numel() == 0:
++                self._heat[layer] = heat
++                continue
++            col_sel = column[head_sel, want_sel]
++            pos[head_sel, col_sel] = wanted_pos.to(pos.device)[want_sel]
++            heat[head_sel, col_sel] = float("inf")
++            self._heat[layer] = heat
+             device = key.device
+-            hi = torch.as_tensor(head_idx, device=device)
+-            ci = torch.as_tensor(col_idx, device=device)
+-            si = torch.as_tensor(src_idx, device=device)
++            hi, ci, si = head_sel.to(device), col_sel.to(device), source.to(pos.device)[want_sel].to(device)
+             fix = (hi, ci, fresh[layer][0][0][hi, si], fresh[layer][1][0][hi, si])
+             groups = self._layers[layer].self_attn.num_heads // heads
+             for block in self._window[layer]:            # the attention history of these entries is void
+@@ -621,6 +673,7 @@ class GhostKVCache(SeedKVCache):
+     # Budget and compression
+     # ------------------------------------------------------------------
+     WINDOW_HEAT = 1e6
++    TEXT_HEAT = 1e3
+     DEFAULT_FOOTPRINT = 4
+ 
+     def _compress(self, past_key_values, capacity, stage):
+@@ -867,6 +920,7 @@ class GhostKVCache(SeedKVCache):
+         if past_key_values is None or self.ratio <= 0 or self.state == "init":
+             return past_key_values
+         self.boundary_logical = int(self.n_logical)
++        self._turn["peak_sharpness"] = float(self._turn["peak_sharpness"])
+         self.turn_log.append(self._turn)
+         self._save_turn_maps()
+         result = self._compress(past_key_values, self._capacity(self.n_logical), "turn_boundary")
+diff --git a/kv_cache_seedkv.py b/kv_cache_seedkv.py
+index 41c3ab1..6b6394a 100644
+--- a/kv_cache_seedkv.py
++++ b/kv_cache_seedkv.py
+@@ -289,6 +289,10 @@ class SeedKVCache:
+                 f"SeedKV: prefill embeddings have shape {tuple(embeds.shape)}, "
+                 f"expected [1, {self.n0}, hidden]")
+         features = self._raw_features
++        if (features is not None and features.dim() == 3 and features.shape[0] > 1
++                and features.shape[0] * features.shape[1] == self.image_len):
++            # Several images (one contiguous visual block): one row of features.
++            features = features.reshape(1, self.image_len, features.shape[-1])
+         image_end = None if self.image_start is None else self.image_start + self.image_len
+         use_features = (
+             self.seed_mode != "embeds"
+@@ -332,7 +336,15 @@ class SeedKVCache:
+     def _text_ids_seed(self, embeds, image_end):
+         """Token ids of the text before/after the image, if they give back its embeddings."""
+         ids = self._raw_ids
+-        if len(ids) != 2 or any(x.dim() != 1 or x.is_floating_point() for x in ids):
++        if any(x.dim() != 1 or x.is_floating_point() for x in ids):
++            return None
++        ids = [x for x in ids if x.numel() > 0]          # nothing between two adjacent images
++        suffix_len = self.n0 - image_end
++        if len(ids) == 1 and ids[0].numel() == self.image_start + suffix_len:
++            ids = [ids[0][: self.image_start], ids[0][self.image_start:]]     # embedded in one call
++        elif len(ids) == 1 and suffix_len == 0:
++            ids = [ids[0], ids[0][:0]]
++        if len(ids) != 2:
+             return None
+         if ids[0].numel() != self.image_start or ids[1].numel() != self.n0 - image_end:
+             return None
+diff --git a/make_long_context.py b/make_long_context.py
+index ed10b7c..bd32e98 100644
+--- a/make_long_context.py
++++ b/make_long_context.py
+@@ -1,9 +1,21 @@
+ #!/usr/bin/env python
+ """Generate long-context versions of a multi-turn image-dialogue dataset.
+ 
+-For every target length N, each conversation's turn-1 user message gets a
+-background passage in front of the question, so that the turn-1 prefill is
+-exactly N tokens.  The turn-1 prefill is everything LLaVA processes in the first
++Two ways to make the turn-1 prefill longer (--mode):
++
++  images (default)  more IMAGE tokens: extra images, taken from other
++                    conversations, are placed right after the conversation's
++                    own image.  One image is a fixed number of visual tokens
++                    (576 for LLaVA-1.5), so the prefill cannot hit every N
++                    exactly: the number of images whose prefill is closest to N
++                    is used and the measured length is recorded.  The question
++                    is unchanged and still about the first image.
++  text              more TEXT tokens: a background passage in front of the
++                    question, so that the prefill is exactly N tokens.
++
++The rest of this description is about --mode text.  For every target length N,
++each conversation's turn-1 user message gets a background passage in front of
++the question, so that the turn-1 prefill is exactly N tokens.  The turn-1 prefill is everything LLaVA processes in the first
+ forward pass: system prompt, expanded image tokens and text, using the model's
+ own tokenizer and conversation template.  Turns 2+ are unchanged; the passage
+ stays in the conversation history and KV cache for them.
+@@ -38,6 +50,8 @@ import os
+ import random
+ import unicodedata
+ 
++import mm_layout
++
+ DEFAULT_HEADER = "Background notes:\n"
+ IMAGE_PLACEHOLDER = "<image>"
+ 
+@@ -110,9 +124,10 @@ def passage_pool(raw_items, filler_file=None):
+     return pool
+ 
+ 
+-def long_context_path(out_dir, data_path, target):
++def long_context_path(out_dir, data_path, target, mode="text"):
+     stem = os.path.splitext(os.path.basename(data_path))[0] if data_path else "synthetic"
+-    return os.path.join(out_dir, f"{stem}_ctx{int(target)}.json")
++    tag = "img" if mode == "images" else "ctx"
++    return os.path.join(out_dir, f"{stem}_{tag}{int(target)}.json")
+ 
+ 
+ # --------------------------------------------------------------------------
+@@ -123,7 +138,8 @@ def long_context_path(out_dir, data_path, target):
+ class PrefillCounter:
+     """Counts turn-1 prefill tokens exactly as LLaVA will see them."""
+ 
+-    def __init__(self, tokenizer, template, image_tokens, conv_mode, header=DEFAULT_HEADER):
++    def __init__(self, tokenizer, template, image_tokens, conv_mode, header=DEFAULT_HEADER,
++                 image_position="first"):
+         from llava.constants import IMAGE_TOKEN_INDEX
+         from llava.mm_utils import tokenizer_image_token
+ 
+@@ -132,6 +148,7 @@ class PrefillCounter:
+         self.image_tokens = int(image_tokens)
+         self.conv_mode = conv_mode
+         self.header = header
++        self.image_position = image_position
+         self._image_index = IMAGE_TOKEN_INDEX
+         self._tokenize = tokenizer_image_token
+         # Prompts longer than model_max_length (2048 in LLaVA's tokenizer config)
+@@ -145,9 +162,8 @@ class PrefillCounter:
+             return original
+         return self.header + passage + padding + "\n\n" + original
+ 
+-    def count(self, question):
+-        if IMAGE_PLACEHOLDER not in question:  # same rule as eval_rogue_final.py
+-            question = question + "\n" + IMAGE_PLACEHOLDER
++    def count(self, question, n_images=1):
++        question = mm_layout.first_turn_question(question, n_images, self.image_position)  # as the evaluators
+         conv = self.template.copy()
+         conv.append_message(conv.roles[0], question)
+         conv.append_message(conv.roles[1], None)
+@@ -235,8 +251,68 @@ def _fit_cut(counter, original, pool_ids, target):
+     return max(under, key=lambda v: v[1]) if under else min(seen.values(), key=lambda v: v[1])
+ 
+ 
+-def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=None, log=print):
+-    """Return (items, report) where every item's turn-1 prefill is `target` tokens."""
++def build_image_context_dataset(raw_items, counter, target, seed=0, log=print):
++    """Return (items, report): extra images after each item's own image so that
++    the turn-1 prefill is as close to `target` tokens as whole images allow."""
++    names = []
++    for item in raw_items:
++        name = item.get("image") or item.get("imagename")
++        if name and name not in names:
++            names.append(name)
++    output, too_long = [], []
++    for index, item in enumerate(raw_items):
++        turns = turns_of(item)
++        if not turns:
++            continue
++        original = turns[0].get("question", "")
++        own = item.get("image") or item.get("imagename")
++        native = counter.count(original, 1)
++        if native > target:
++            too_long.append(index)
++            continue
++        extra = int(round((target - native) / float(counter.image_tokens)))
++        others = [name for name in names if name != own]
++        random.Random(seed * 1000003 + index).shuffle(others)
++        if own is None:                      # synthetic items: the evaluator draws noise images
++            chosen = [None] * extra
++        elif not others:
++            chosen = [own] * extra
++        else:
++            chosen = [others[i % len(others)] for i in range(extra)]
++        measured = counter.count(original, 1 + extra)
++        new_item = {k: v for k, v in item.items() if k not in ("turns", "question", "answer")}
++        new_item["turns"] = turns
++        new_item["extra_images"] = chosen
++        new_item["long_context"] = {
++            "mode": "images",
++            "image_position": counter.image_position,
++            "requested_prefill_tokens": int(target),
++            "target_prefill_tokens": int(measured),
++            "prefill_tokens": int(measured),
++            "native_prefill_tokens": int(native),
++            "added_tokens": int(measured - native),
++            "images": 1 + extra,
++            "image_tokens": counter.image_tokens,
++            "conv_mode": counter.conv_mode,
++            "seed": seed,
++            "original_question": original,
++        }
++        output.append(new_item)
++    lengths = sorted({item["long_context"]["prefill_tokens"] for item in output})
++    report = {"target": int(target), "written": len(output),
++              "skipped_native_longer_than_target": len(too_long), "not_exact": len(output),
++              "prefill_tokens": lengths}
++    if output:
++        images = sorted({item["long_context"]["images"] for item in output})
++        log(f"  ctx={target}: {images} image(s) per conversation, prefill {lengths[0]}..{lengths[-1]} tokens")
++    return output, report
++
++
++def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=None, log=print, mode="text"):
++    """Return (items, report) where every item's turn-1 prefill is `target` tokens
++    (mode "text") or as close to it as whole images allow (mode "images")."""
++    if mode == "images":
++        return build_image_context_dataset(raw_items, counter, target, seed=seed, log=log)
+     pool = passage_pool(raw_items, filler_file)
+     source = os.path.basename(filler_file) if filler_file else "reference answers of other conversations"
+     output, too_long, inexact = [], [], []
+@@ -257,6 +333,9 @@ def build_long_context_dataset(raw_items, counter, target, seed=0, filler_file=N
+         new_item = {k: v for k, v in item.items() if k not in ("turns", "question", "answer")}
+         new_item["turns"] = turns
+         new_item["long_context"] = {
++            "mode": "text",
++            "image_position": counter.image_position,
++            "requested_prefill_tokens": int(target),
+             "target_prefill_tokens": int(target),
+             "prefill_tokens": int(measured),
+             "native_prefill_tokens": int(native),
+@@ -314,6 +393,9 @@ def main(argv=None):
+     parser.add_argument("--filler-file", default=None)
+     parser.add_argument("--header", default=DEFAULT_HEADER)
+     parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--mode", default="images", choices=["images", "text"],
++                        help="Lengthen the context with extra images (default) or with a text passage.")
++    mm_layout.add_arguments(parser)
+     args = parser.parse_args(argv)
+ 
+     from transformers import AutoTokenizer
+@@ -322,7 +404,8 @@ def main(argv=None):
+ 
+     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)  # as llava's builder
+     conv_mode = args.conv_mode or infer_conv_mode(get_model_name_from_path(args.model_path))
+-    counter = PrefillCounter(tokenizer, conv_templates[conv_mode], args.image_tokens, conv_mode, args.header)
++    counter = PrefillCounter(tokenizer, conv_templates[conv_mode], args.image_tokens, conv_mode, args.header,
++                             image_position=args.image_position)
+ 
+     with open(args.data_path, "r") as handle:
+         raw_items = json.load(handle)
+@@ -332,9 +415,9 @@ def main(argv=None):
+     print(f"conv_mode={conv_mode} image_tokens={args.image_tokens} items={len(raw_items)}")
+     for target in args.context_lengths:
+         items, report = build_long_context_dataset(
+-            raw_items, counter, target, seed=args.seed, filler_file=args.filler_file
++            raw_items, counter, target, seed=args.seed, filler_file=args.filler_file, mode=args.mode
+         )
+-        path = long_context_path(out_dir, args.data_path, target)
++        path = long_context_path(out_dir, args.data_path, target, args.mode)
+         write_dataset(path, items)
+         print(f"ctx={target}: wrote {report['written']} conversations -> {path}")
+ 
+diff --git a/mm_layout.py b/mm_layout.py
+new file mode 100644
+index 0000000..e8e7e6c
+--- /dev/null
++++ b/mm_layout.py
+@@ -0,0 +1,52 @@
++"""
++Where the image goes in the Turn-1 prompt, shared by every evaluator.
++
++    first (default)  <system> USER: <image>...<image>\\n<question> ASSISTANT:
++    last  (old)      <system> USER: <question>\\n<image>...<image> ASSISTANT:
++
++"first" is LLaVA's own evaluation layout.  With the image first, the image KV
++does not depend on the question, and everything in front of the image is the
++short system prompt.
++
++An item may list more images in ``extra_images`` (make_long_context.py writes
++them to make the context longer).  All images of an item form ONE contiguous
++block of visual tokens: the item's own image first, then the extra ones.
++"""
++
++IMAGE_PLACEHOLDER = "<image>"
++POSITIONS = ("first", "last")
++
++
++def image_files(item):
++    """File names of an item's images, its own image first."""
++    own = item.get("image") or item.get("imagename")
++    return [own] + list(item.get("extra_images") or [])
++
++
++def first_turn_question(question, n_images=1, position="first"):
++    """The Turn-1 user message with its image placeholders."""
++    if position not in POSITIONS:
++        raise ValueError(f"image position must be one of {POSITIONS}")
++    text = (question or "").replace(IMAGE_PLACEHOLDER, "").strip()
++    block = IMAGE_PLACEHOLDER * max(1, int(n_images))
++    return block + "\n" + text if position == "first" else text + "\n" + block
++
++
++def image_block(ids, image_token_index):
++    """(start, count) of the contiguous run of image placeholders in a list of ids."""
++    ids = [int(token) for token in ids]
++    where = [index for index, token in enumerate(ids) if token == image_token_index]
++    if not where:
++        return None, 0
++    if where[-1] - where[0] + 1 != len(where):
++        raise ValueError(
++            "The image placeholders must be next to each other (one visual block); "
++            f"found them at positions {where}.")
++    return where[0], len(where)
++
++
++def add_arguments(parser):
++    parser.add_argument(
++        "--image-position", default="first", choices=list(POSITIONS),
++        help="Turn-1 layout: image before the question (first, LLaVA's own layout) "
++             "or after it (last, this repo's layout before November 2026).")
+diff --git a/run-job-ghostkv b/run-job-ghostkv
+index d7c61b2..ce351a4 100755
+--- a/run-job-ghostkv
++++ b/run-job-ghostkv
+@@ -30,7 +30,9 @@ METHODS=${METHODS:-"pyramidkv turncast_kv seedkv ghostkv"}
+ STAGES=${STAGES:-"calibrate ppl rouge efficiency"}
+ SAMPLES_ARG=${SAMPLES:+--eval-samples $SAMPLES}     # default: all conversations
+ MAXTOK=${MAXTOK:-512}
+-LOCATORS=${LOCATORS:-$ROOT/ghostkv_data/locators_llava15_7b.pt}
++# Image-first layout (mm_layout.py): a locator file made with the old layout
++# (question before the image) is not valid any more, hence the new name.
++LOCATORS=${LOCATORS:-$ROOT/ghostkv_data/locators_llava15_7b_imagefirst.pt}
+ CALIB_SAMPLES=${CALIB_SAMPLES:-20}
+ # Extra flags for GhostKV only, e.g. "--ghostkv-fault-on answer" (fewer faults),
+ # "--seedkv-allocation pyramidkv" (same entries per layer as PyramidKVCache) or
+@@ -91,5 +93,6 @@ if [[ " $STAGES " == *" efficiency "* ]]; then
+   python eval_efficiency.py \
+     --methods full $METHODS \
+     --ratios $RATIOS --ghostkv-locators $LOCATORS \
+-    --context-lengths native --gen-tokens 64 --num-turns 3
++    --context-lengths native 2048 3584 --long-context-mode images \
++    --gen-tokens 64 --num-turns 3
+ fi
+diff --git a/seedkv/README_ghostkv.md b/seedkv/README_ghostkv.md
+index 3ee5af3..7cf7832 100644
+--- a/seedkv/README_ghostkv.md
++++ b/seedkv/README_ghostkv.md
+@@ -1,5 +1,9 @@
+ # GhostKV: regenerate only the image patches the question needs
+ 
++> November 2026 update: the evaluators now put the image first and long
++> contexts are made of extra images. Read `README_image_first.md` first; the
++> results below were measured with the old layout (`--image-position last`).
++
+ `kv_cache_ghostkv.py` · `--method ghostkv`
+ 
+ SeedKV keeps a seed of the image and, for every new question, regenerates the
+@@ -143,6 +147,14 @@ instead of 1.037. With `--ghostkv-fault-on answer`: 1.4 faults per turn, same
+ perplexity. On a GPU each fault costs about one decoding step; I could not
+ measure that here.
+ 
++### Speed
++
++The per-token test is one batched matrix product per locator layer with a
++single GPU-to-CPU sync, and a fault is handled for all heads of a layer at
++once. For the lowest latency use `--ghostkv-context resident` (a fault then
++recomputes only the missing patches, not the text before the image) and
++`--ghostkv-fault-on answer`. Timings were not measured here (CPU only).
++
+ ## Results
+ 
+ **Everything below ran on CPU on a stand-in**, not on LLaVA: an 8-layer,
+@@ -287,9 +299,11 @@ first two rows show.
+ | `--ghostkv-ghost-share` | 0.02 | ... as long as their keys fit in this share of the budget (at least 1). |
+ | `--ghostkv-threshold` | `auto` | Missing attention that triggers a fault. `auto`: half the head's 90th-percentile level from calibration. Lower = more faults. |
+ | `--ghostkv-page-slots` / `--ghostkv-page-frac` | auto / 0.3 | Protected paged patches: 30% of the layer budget, at least one "look" of the best head. |
+-| `--ghostkv-fault-on` | `all` | `answer`: no faults while the question is read (cheaper). |
++| `--ghostkv-fault-on` | `answer` | `all`: also fault while a later-turn question is read. |
++| `--ghostkv-victims` | `image` | A paged-in patch overwrites image entries only. `any`: text and old recent-window entries too when a head has no image entry left. |
+ | `--ghostkv-context` | `prefix+resident` | What a regenerated patch sees. `resident` skips recomputing the text (cheapest). |
+ | `--ghostkv-max-faults` | 0 | Cap on regenerations per turn (0 = none). |
++| `--ghostkv-detect-every` | 1 | Look for faults on every n-th token. Faster, but on the stand-in it costs quality (perplexity 1.04 -> 1.22 at 2). |
+ | `--ghostkv-demand-decay` | 0.9 | How fast an old request fades. |
+ | `--ghostkv-cover` | 0.9 | A fault pages the patches holding this share of the missing attention. |
+ | `--ghostkv-image-weight` | 1.0 | Below 1 keeps more text at compression. No clear gain on the stand-in. |
+diff --git a/seedkv/README_image_first.md b/seedkv/README_image_first.md
+new file mode 100644
+index 0000000..af84599
+--- /dev/null
++++ b/seedkv/README_image_first.md
+@@ -0,0 +1,163 @@
++# Image-first layout and image-based long context (November 2026)
++
++## What changed
++
++| | Before | Now |
++|---|---|---|
++| Turn-1 prompt | `USER: <question>\n<image>` | `USER: <image>\n<question>` (LLaVA's own layout) |
++| Long context (`--context-lengths N`) | text passage before the question | extra images after the conversation's own image |
++| Images per item | exactly one | one or more, as one contiguous block |
++
++* `mm_layout.py` is the single place that builds the Turn-1 message. Every
++  evaluator has `--image-position first|last`; `last` reproduces the old
++  numbers exactly (checked: SeedKV 1.399, same as before).
++* `make_long_context.py --mode images` (default) adds images from other
++  conversations and writes them to `extra_images`. One image is a fixed number
++  of tokens (576 for LLaVA-1.5), so N cannot be hit exactly: the number of
++  images whose prefill is closest to N is used, and the table's `prefill`
++  column shows the real length (on LLaVA-1.5 roughly: 2048 -> 3 images, about
++  1,790 tokens; 3584 -> 6 images, about 3,520). `--mode text` is the old behaviour. Files are
++  named `<data>_imgN.json`, so old `_ctxN.json` files are not reused by mistake.
++* `eval_ppl_final.py`, `eval_rouge_final2.py` and `eval_efficiency.py` load
++  `extra_images` and pass `image_token_len = images x 576` to every cache.
++* `turncast/collect.py` uses the same layout (not run here).
++
++Not changed: the older scripts (`eval_ppl.py`, `eval_rouge.py`,
++`eval_rogue_final.py`, `eval_latency.py`, ...) still build the old layout.
++
++**Everything measured with the old layout has to be re-run**, and two files
++have to be rebuilt because they were made in the old layout:
++
++* the GhostKV locator file (`--ghostkv-calibrate`);
++* the TurnCast-KV scorer (`turncast/collect.py`, `turncast/train.py`).
++
++LLaVA-1.5 has 4,096 positions. Seven images already fill them (7 x 576 =
++4,032 plus the text), so 6 images (`--context-lengths 3584`) is the practical
++ceiling for a conversation that still has room to answer.
++
++## Baselines: review against the new layout
++
++I read the six baselines for anything that depends on where the image is.
++None needs a code change.
++
++| Method | Verdict | Notes |
++|---|---|---|
++| `tgv_kv` | correct, and the new layout is the one it was written for | It scores image tokens by the attention from the text AFTER the image. In the old layout that text was only `ASSISTANT:`, so the "text guidance" did not see the question. Now it does. As in the official code there is no turn-boundary step: while decoding it evicts one entry per token, chosen from everything except the first `start_size` and the last few entries, so later turns can lose recent dialogue. |
++| `pyramidkv` | correct | Its observation window is the last 8 prefill tokens. Old layout: the tail of the image plus `ASSISTANT:`. New layout: the end of the question, as in the paper. |
++| `meda` | correct | Cross-modal entropy now uses real question-to-image attention. Its rule ranks every text entry above every image entry, so with one image at ratio 0.9 almost no image entry survives selection (only merged). That is the paper's rule, not a bug. |
++| `elastic_cache` | matches the official code | Including the official code's `torch.argsort(...) > forget_num` line, which compares sort indices instead of ranks, so the kept set is not a true importance ranking. I left it as is so the baseline stays the official one. |
++| `h2o` | correct | Layout-independent. |
++| `local_cache` | correct | Keeps the start and the most recent entries; with the image first and a long context the image is dropped entirely. |
++
++The older comparison was tilted: with the question before the image, the
++question-aware methods (TGV-KV, PyramidKV, MEDA) could not see the question
++when they scored the image.
++
++## SeedKV and GhostKV
++
++* SeedKV: the seed now holds the features of all images (`[images, 576, 1024]`
++  flattened); the text ids before and after the image block are found for any
++  number of images. All 29 checks pass with the image first.
++* GhostKV: same seed fix; the vectorised detection and fault handling
++  (`ghostkv_speed_update.patch`) are included. Two defaults changed:
++  * `--ghostkv-fault-on answer` (was `all`): page in only while answering.
++  * `--ghostkv-victims image` (new): a paged-in patch overwrites image entries
++    only, so paging never displaces text. `any` is the previous behaviour.
++  All 27 checks pass with the image first.
++* With the image first, the text in front of the image is the system prompt
++  (about 35 tokens on LLaVA), so one fault recomputes about 35 tokens plus the
++  missing patches instead of the whole passage.
++
++## Running time (CPU stand-in, not LLaVA)
++
++`seedkv/run_efficiency_cpu.py` runs the unchanged `eval_efficiency.py` on the
++stand-in. Ratio 0.9, 4 turns, 12 generated tokens per turn, 8 conversations,
++contexts of 1, 4, 8 and 13 images (144 tokens each):
++
++| Prefill | Method | TTFT2+ ms | TPOT ms | Conversation s | KV peak MiB |
++|---|---|---|---|---|---|
++| 188 | PyramidKV | 36.3 | 3.90 | 0.34 | 0.4 |
++| 188 | SeedKV | 53.8 | 3.72 | 0.38 | 1.7 |
++| 188 | GhostKV | 33.8 | 6.21 | 0.45 | 0.3 |
++| 620 | PyramidKV | 37.4 | 4.18 | 0.41 | 0.7 |
++| 620 | SeedKV | 101.9 | 4.14 | 0.60 | 5.1 |
++| 620 | GhostKV | 38.2 | 6.69 | 0.54 | 0.6 |
++| 1196 | PyramidKV | 39.9 | 4.35 | 0.52 | 1.2 |
++| 1196 | SeedKV | 195.0 | 4.85 | 1.00 | 9.6 |
++| 1196 | GhostKV | 35.5 | 7.04 | 0.64 | 0.9 |
++| 1916 | PyramidKV | 41.5 | 4.73 | 0.93 | 1.7 |
++| 1916 | SeedKV | 375.9 | 4.69 | 1.74 | 15.3 |
++| 1916 | GhostKV | 40.8 | 7.89 | 0.93 | 1.4 |
++
++* Time to first token of later turns: GhostKV equals PyramidKV at every
++  context size. SeedKV's grows with the context (it re-runs the whole prefill)
++  and is 9x GhostKV's at 13 images.
++* Per token GhostKV is slower than both (about +2.5 ms on this tiny model):
++  1.5 to 2 faults per turn at about 12 ms each, spread over only 12 generated
++  tokens, plus 0.35 ms of detection per token.
++* Whole conversation: GhostKV is faster than SeedKV from 4 images up and
++  slower with a single image. On LLaVA I expect the same shape: about equal at
++  the native context, clearly faster with several images. That is an
++  expectation, not a measurement.
++
++Raw table: `seedkv/image_first_standin_efficiency.csv`.
++
++## Quality on a stand-in retrained with the image first
++
++100 conversations x 4 turns, perplexity of the reference answers, all turns
++(shift / same):
++
++| Method | ratio 0.5 | 0.8 | 0.9 |
++|---|---|---|---|
++| Full cache | 1.00 / 1.00 | | |
++| PyramidKV | 1.18 / 1.12 | 1.69 / 1.69 | 2.41 / 2.75 |
++| TGV-KV | 2.25 / 3.37 | 3.42 / 3.00 | 9.54 / 8.50 |
++| SeedKV | 1.14 / 1.16 | 1.52 / 1.57 | 2.28 / 2.52 |
++| GhostKV | 1.03 / 1.01 | 1.59 / 1.54 | 2.87 / 4.42 |
++| GhostKV, paging off | 1.19 / 1.14 | 1.73 / 1.75 | 2.54 / 3.27 |
++
++Exact answers on shift: ratio 0.5: GhostKV 96%, SeedKV 86%, PyramidKV 85%;
++ratio 0.9: SeedKV 50%, GhostKV 35%, PyramidKV 29%.
++
++**This is weaker than the earlier (old-layout) GhostKV result, and you should
++know why before relying on either:**
++
++* At ratio 0.5 and 0.8 GhostKV is the best or tied. At 0.9 it is worse than
++  PyramidKV in perplexity. On this stand-in the budget at 0.9 is 19 entries
++  per layer and GhostKV's seed plus ghost keys take 19% of it (about 5% on
++  LLaVA). With no faults at all that overhead alone costs 2.6 -> 3.0.
++* On this stand-in, compression at 0.8 to 0.9 mostly breaks the *wording* of
++  the answers for every method, not the image lookup. Paging fixes lookups
++  (wrong-attribute answers: 39 with PyramidKV, 5 with GhostKV on 120 later
++  turns) but cannot fix wording.
++* Paging while the question is read, and letting patches overwrite text, both
++  made this stand-in much worse (later-turn perplexity 14 instead of 3). That
++  is why the two defaults changed. On the old stand-in they were harmless.
++* Two small synthetic models now disagree about how much GhostKV helps at
++  high ratios. Only LLaVA runs can settle it.
++
++Raw numbers: `seedkv/image_first_standin_results.json`.
++
++## Run it
++
++    # long-context files with extra images (also made automatically by eval_efficiency.py)
++    python make_long_context.py --model-path $MODEL --data-path ConvBench/convbench.json \
++        --context-lengths 2048 3584 --mode images
++
++    # GhostKV locators for the new layout (once)
++    python eval_ppl_final.py --model-path $MODEL --data-path $DATA --image-path $IMAGES \
++        --eval-samples 20 --method ghostkv --ratio 0.9 \
++        --ghostkv-calibrate locators_llava15_7b_imagefirst.pt --output-dir logs --exp-name calib
++
++    python eval_efficiency.py --methods full pyramidkv seedkv ghostkv --ratios 0.9 \
++        --context-lengths native 2048 3584 --long-context-mode images \
++        --ghostkv-locators locators_llava15_7b_imagefirst.pt --gen-tokens 64 --num-turns 3
++
++    # PPL / ROUGE on a long-context file: pass it as --data-path
++    python eval_ppl_final.py ... --data-path ConvBench/long_context/convbench_img2048.json
++
++    # the old layout, to reproduce earlier numbers
++    python eval_ppl_final.py ... --image-position last
++
++Stand-in for the new layout: `python seedkv/make_standin.py --out DIR`
++(`--image-position last` builds the old one).
+diff --git a/seedkv/image_first_standin_efficiency.csv b/seedkv/image_first_standin_efficiency.csv
+new file mode 100644
+index 0000000..5f41803
+--- /dev/null
++++ b/seedkv/image_first_standin_efficiency.csv
+@@ -0,0 +1,17 @@
++model,context_length,method,ratio,gen_tokens,num_turns_arg,stop_at_eos,temperature,output_attentions,prefill_attention,kv_budget,status,num_samples,num_turns,prefill_tokens,final_logical_len,generated_tokens,ttft_turn1_ms,ttft_later_ms,tpot_ms,itl_p99_ms,latency_turn_ms,boundary_ms,decode_tps,prefill_tps,e2e_s,e2e_std_s,e2e_output_tps,e2e_total_tps,peak_mem_gib,peak_mem_max_gib,peak_over_base_gib,peak_prefill_gib,peak_reserved_gib,peak_mem_exact,kv_after_prefill_mib,kv_final_mib,kv_full_final_mib,kv_compression,kv_max_retained_mib,kv_max_transient_mib,cache_state_mib,policy_share
++llava-v1-standin,native,full,0.0,12,4,False,0.0,False,none,1.0,ok,8,4.0,187.5,267.75,48.0,22.5588,38.6128,4.0431,6.3728,79.0732,7.7639,247.3361,10226.7112,0.3479,0.0345,139.0205,775.6243,0.4553,0.4553,0.0,0.4553,,False,1.4648,2.0918,2.0918,1.0,2.0918,2.0918,0.0,
++llava-v1-standin,native,pyramidkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,187.5,267.75,48.0,24.444,36.2877,3.9043,6.8539,76.2743,9.1151,256.1268,9570.9064,0.3421,0.0663,143.8772,802.5075,0.4596,0.4596,0.0,0.4595,,False,0.1641,0.209,2.0918,0.0999,0.3799,1.4648,0.0,
++llava-v1-standin,native,seedkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,187.5,267.75,48.0,23.8871,53.8078,3.718,6.8262,87.2252,8.3718,268.9647,9508.3083,0.3829,0.0249,125.815,701.7853,0.46,0.46,0.0,0.46,,False,0.1221,0.1724,2.0918,0.0824,1.7031,1.7109,0.0234,
++llava-v1-standin,native,ghostkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,187.5,267.75,48.0,26.5109,33.8019,6.2066,21.3249,100.2514,12.3234,161.1196,8588.313,0.4509,0.0351,106.9957,596.8539,0.4611,0.4611,0.0,0.4611,,False,0.1133,0.1768,2.0918,0.0845,0.3379,1.4648,0.0595,
++llava-v1-standin,620,full,0.0,12,4,False,0.0,False,none,1.0,ok,8,4.0,619.5,699.75,48.0,66.3886,46.3074,4.7963,8.0045,104.0875,9.574,208.492,11562.2695,0.4565,0.0689,106.986,1559.8372,0.4907,0.4908,0.0001,0.4907,,False,4.8398,5.4668,5.4668,1.0,5.4668,5.4668,0.0,
++llava-v1-standin,620,pyramidkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,619.5,699.75,48.0,76.884,37.4195,4.1844,8.1257,93.3136,9.4195,238.9849,9880.2588,0.4127,0.0436,117.3369,1710.442,0.5296,0.5296,0.0,0.5296,,False,0.4922,0.5625,5.4668,0.1029,0.7119,4.8398,0.0,
++llava-v1-standin,620,seedkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,619.5,699.75,48.0,74.5829,101.9234,4.1361,10.931,140.5859,8.1023,241.7712,10165.8029,0.5964,0.0602,81.1505,1182.8831,0.5296,0.5296,0.0,0.5296,,False,0.4053,0.2322,5.4668,0.0425,5.134,5.1418,0.0785,
++llava-v1-standin,620,ghostkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,619.5,699.75,48.0,75.047,38.2037,6.6856,28.0565,120.9563,13.99,149.575,9998.7572,0.5421,0.1046,90.7633,1323.3123,0.5296,0.5296,0.0,0.5296,,False,0.3701,0.4365,5.4668,0.0798,0.5947,4.8398,0.2232,
++llava-v1-standin,1200,full,0.0,12,4,False,0.0,False,none,1.0,ok,8,4.0,1195.5,1275.75,48.0,160.1914,60.3665,6.5958,13.494,157.8769,12.7856,151.6108,8920.9679,0.6865,0.066,70.4867,1873.2803,0.5543,0.5543,0.0,0.5543,,False,9.3398,9.9668,9.9668,1.0,9.9668,9.9668,0.0,
++llava-v1-standin,1200,pyramidkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1195.5,1275.75,48.0,162.4931,39.9168,4.3464,8.0316,118.3712,10.6157,230.0762,8517.9853,0.5188,0.0543,93.3698,2481.4455,0.7096,0.7162,0.0017,0.7096,,False,0.9375,1.0078,9.9668,0.1011,1.1553,9.3398,0.0,
++llava-v1-standin,1200,seedkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1195.5,1275.75,48.0,165.9343,194.9533,4.8516,13.3052,241.0657,9.2655,206.1192,8493.5944,1.0045,0.0629,47.9447,1274.2647,0.7162,0.7162,0.0,0.7162,,False,0.7881,0.2446,9.9668,0.0245,9.644,9.6519,0.1488,
++llava-v1-standin,1200,ghostkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1195.5,1275.75,48.0,167.1785,35.5419,7.0373,22.0335,145.8617,14.3925,142.0993,8536.362,0.644,0.0423,74.8036,1988.1517,0.7166,0.7166,0.0,0.7166,,False,0.7178,0.7803,9.9668,0.0783,0.9414,9.3398,0.4412,
++llava-v1-standin,1900,full,0.0,12,4,False,0.0,False,none,1.0,ok,8,4.0,1915.5,1995.75,48.0,356.6458,65.3188,7.2246,12.0171,217.6214,14.2478,138.4155,5999.6177,0.933,0.0835,51.7783,2152.7982,0.7167,0.7167,0.0,0.7167,,False,14.9648,15.5918,15.5918,1.0,15.5918,15.5918,0.0,
++llava-v1-standin,1900,pyramidkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1915.5,1995.75,48.0,548.5058,41.526,4.7273,19.1692,220.2714,11.7765,211.5368,3776.7222,0.9333,0.0404,51.514,2141.8673,0.7871,1.0634,0.2947,0.7871,,False,1.5117,1.5547,15.5918,0.0997,1.7295,14.9648,0.0,
++llava-v1-standin,1900,seedkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1915.5,1995.75,48.0,362.6994,375.8734,4.6879,13.2755,424.1464,9.1049,213.3167,5934.2523,1.7383,0.0598,27.6418,1149.3039,0.6795,0.6795,0.0,0.6795,,False,1.2627,0.2504,15.5918,0.0161,15.2766,15.2844,0.2371,
++llava-v1-standin,1900,ghostkv,0.9,12,4,False,0.0,True,per_layer,0.1,ok,8,4.0,1915.5,1995.75,48.0,385.1842,40.8418,7.8918,27.0591,213.7375,18.2088,126.7133,5550.9492,0.9328,0.0465,51.5773,2144.4807,0.6796,0.6796,0.0,0.6796,,False,1.1484,1.2109,15.5918,0.0777,1.3721,14.9648,0.7141,
+diff --git a/seedkv/image_first_standin_results.json b/seedkv/image_first_standin_results.json
+new file mode 100644
+index 0000000..dc825f6
+--- /dev/null
++++ b/seedkv/image_first_standin_results.json
+@@ -0,0 +1,441 @@
++{
++ "ppl|shift|full|0.0": {
++  "ppl": 1.0034065246582031,
++  "per_turn": {
++   "1": 1.0026527643203735,
++   "2": 1.001516580581665,
++   "3": 1.0026555061340332,
++   "4": 1.0068188905715942
++  },
++  "seconds": 25.5
++ },
++ "ppl|shift|pyramidkv|0.9": {
++  "ppl": 2.41068696975708,
++  "per_turn": {
++   "1": 1.886704921722412,
++   "2": 2.1729557514190674,
++   "3": 2.6103920936584473,
++   "4": 3.1688947677612305
++  },
++  "seconds": 23.0
++ },
++ "ppl|shift|pyramidkv|0.5": {
++  "ppl": 1.1826863288879395,
++  "per_turn": {
++   "1": 1.078530192375183,
++   "2": 1.1786749362945557,
++   "3": 1.216671347618103,
++   "4": 1.2669379711151123
++  },
++  "seconds": 25.1
++ },
++ "ppl|shift|pyramidkv|0.8": {
++  "ppl": 1.6934109926223755,
++  "per_turn": {
++   "1": 1.3694175481796265,
++   "2": 1.7283127307891846,
++   "3": 1.8713703155517578,
++   "4": 1.8635380268096924
++  },
++  "seconds": 25.6
++ },
++ "ppl|shift|seedkv|0.9": {
++  "ppl": 2.2821335792541504,
++  "per_turn": {
++   "1": 2.3434650897979736,
++   "2": 2.142573595046997,
++   "3": 2.179246664047241,
++   "4": 2.47751522064209
++  },
++  "seconds": 30.2
++ },
++ "ppl|shift|seedkv|0.5": {
++  "ppl": 1.1411865949630737,
++  "per_turn": {
++   "1": 1.129582166671753,
++   "2": 1.0989446640014648,
++   "3": 1.1684967279434204,
++   "4": 1.1695233583450317
++  },
++  "seconds": 32.6
++ },
++ "ppl|shift|seedkv|0.8": {
++  "ppl": 1.5237916707992554,
++  "per_turn": {
++   "1": 1.4760692119598389,
++   "2": 1.5218545198440552,
++   "3": 1.5779212713241577,
++   "4": 1.5219677686691284
++  },
++  "seconds": 31.8
++ },
++ "ppl|shift|ghostkv|0.9": {
++  "ppl": 2.8717260360717773,
++  "per_turn": {
++   "1": 2.289116859436035,
++   "2": 3.3327183723449707,
++   "3": 3.1191678047180176,
++   "4": 2.8691234588623047
++  },
++  "seconds": 34.5
++ },
++ "ppl|shift|ghostkv|0.5": {
++  "ppl": 1.0336899757385254,
++  "per_turn": {
++   "1": 1.0027453899383545,
++   "2": 1.0282832384109497,
++   "3": 1.0498199462890625,
++   "4": 1.0552968978881836
++  },
++  "seconds": 33.6
++ },
++ "ppl|shift|ghostkv|0.8": {
++  "ppl": 1.5948830842971802,
++  "per_turn": {
++   "1": 1.3005887269973755,
++   "2": 1.3816728591918945,
++   "3": 1.4592512845993042,
++   "4": 2.4747302532196045
++  },
++  "seconds": 32.4
++ },
++ "ppl|shift|ghostkv_no_paging|0.9": {
++  "ppl": 2.5384819507598877,
++  "per_turn": {
++   "1": 2.0250301361083984,
++   "2": 2.1354410648345947,
++   "3": 2.833354949951172,
++   "4": 3.402444839477539
++  },
++  "seconds": 23.8
++ },
++ "ppl|shift|ghostkv_no_paging|0.5": {
++  "ppl": 1.191987156867981,
++  "per_turn": {
++   "1": 1.1149653196334839,
++   "2": 1.1984961032867432,
++   "3": 1.244602084159851,
++   "4": 1.2152888774871826
++  },
++  "seconds": 26.5
++ },
++ "ppl|shift|ghostkv_no_paging|0.8": {
++  "ppl": 1.7343508005142212,
++  "per_turn": {
++   "1": 1.4192829132080078,
++   "2": 1.7377299070358276,
++   "3": 1.8811839818954468,
++   "4": 1.9568794965744019
++  },
++  "seconds": 24.3
++ },
++ "ppl|shift|tgv_kv|0.9": {
++  "ppl": 9.537049293518066,
++  "per_turn": {
++   "1": 18.609163284301758,
++   "2": 6.903318881988525,
++   "3": 7.404753684997559,
++   "4": 8.597803115844727
++  },
++  "seconds": 25.6
++ },
++ "ppl|shift|tgv_kv|0.5": {
++  "ppl": 2.249302864074707,
++  "per_turn": {
++   "1": 2.406829833984375,
++   "2": 2.535773754119873,
++   "3": 2.0799169540405273,
++   "4": 2.013786554336548
++  },
++  "seconds": 28.5
++ },
++ "ppl|shift|tgv_kv|0.8": {
++  "ppl": 3.423020601272583,
++  "per_turn": {
++   "1": 5.958291053771973,
++   "2": 2.5728607177734375,
++   "3": 3.0053367614746094,
++   "4": 2.952528238296509
++  },
++  "seconds": 27.0
++ },
++ "ppl|same|full|0.0": {
++  "ppl": 1.0045534372329712,
++  "per_turn": {
++   "1": 1.0014264583587646,
++   "2": 1.0017708539962769,
++   "3": 1.0061390399932861,
++   "4": 1.0084309577941895
++  },
++  "seconds": 29.6
++ },
++ "ppl|same|pyramidkv|0.9": {
++  "ppl": 2.7535250186920166,
++  "per_turn": {
++   "1": 2.649425745010376,
++   "2": 2.6833436489105225,
++   "3": 2.8938498497009277,
++   "4": 2.780278444290161
++  },
++  "seconds": 27.8
++ },
++ "ppl|same|pyramidkv|0.5": {
++  "ppl": 1.1225917339324951,
++  "per_turn": {
++   "1": 1.130894422531128,
++   "2": 1.1365950107574463,
++   "3": 1.0966466665267944,
++   "4": 1.1274291276931763
++  },
++  "seconds": 31.7
++ },
++ "ppl|same|pyramidkv|0.8": {
++  "ppl": 1.6872788667678833,
++  "per_turn": {
++   "1": 1.7753233909606934,
++   "2": 1.7005606889724731,
++   "3": 1.6757800579071045,
++   "4": 1.6144556999206543
++  },
++  "seconds": 28.5
++ },
++ "ppl|same|seedkv|0.9": {
++  "ppl": 2.5199453830718994,
++  "per_turn": {
++   "1": 3.838068962097168,
++   "2": 2.2476541996002197,
++   "3": 2.05607533454895,
++   "4": 2.4135053157806396
++  },
++  "seconds": 35.7
++ },
++ "ppl|same|seedkv|0.5": {
++  "ppl": 1.1589059829711914,
++  "per_turn": {
++   "1": 1.1640464067459106,
++   "2": 1.183105707168579,
++   "3": 1.1285940408706665,
++   "4": 1.1607801914215088
++  },
++  "seconds": 38.1
++ },
++ "ppl|same|seedkv|0.8": {
++  "ppl": 1.5660247802734375,
++  "per_turn": {
++   "1": 1.927528977394104,
++   "2": 1.5449843406677246,
++   "3": 1.4097956418991089,
++   "4": 1.4756735563278198
++  },
++  "seconds": 35.5
++ },
++ "ppl|same|ghostkv|0.9": {
++  "ppl": 4.424899101257324,
++  "per_turn": {
++   "1": 3.583911418914795,
++   "2": 7.867715358734131,
++   "3": 4.120156288146973,
++   "4": 3.1993231773376465
++  },
++  "seconds": 35.0
++ },
++ "ppl|same|ghostkv|0.5": {
++  "ppl": 1.0105425119400024,
++  "per_turn": {
++   "1": 1.0068703889846802,
++   "2": 1.0117793083190918,
++   "3": 1.007021427154541,
++   "4": 1.0158860683441162
++  },
++  "seconds": 30.8
++ },
++ "ppl|same|ghostkv|0.8": {
++  "ppl": 1.5379164218902588,
++  "per_turn": {
++   "1": 1.4131520986557007,
++   "2": 1.5792263746261597,
++   "3": 1.5044976472854614,
++   "4": 1.643916130065918
++  },
++  "seconds": 31.2
++ },
++ "ppl|same|ghostkv_no_paging|0.9": {
++  "ppl": 3.274176836013794,
++  "per_turn": {
++   "1": 3.205425500869751,
++   "2": 3.348093032836914,
++   "3": 3.3721673488616943,
++   "4": 3.1676299571990967
++  },
++  "seconds": 25.8
++ },
++ "ppl|same|ghostkv_no_paging|0.5": {
++  "ppl": 1.1407105922698975,
++  "per_turn": {
++   "1": 1.1583318710327148,
++   "2": 1.1526604890823364,
++   "3": 1.1158175468444824,
++   "4": 1.138709545135498
++  },
++  "seconds": 27.7
++ },
++ "ppl|same|ghostkv_no_paging|0.8": {
++  "ppl": 1.7507797479629517,
++  "per_turn": {
++   "1": 1.8902510404586792,
++   "2": 1.7812923192977905,
++   "3": 1.667608380317688,
++   "4": 1.6915593147277832
++  },
++  "seconds": 26.7
++ },
++ "ppl|same|tgv_kv|0.9": {
++  "ppl": 8.500299453735352,
++  "per_turn": {
++   "1": 27.337385177612305,
++   "2": 4.838931083679199,
++   "3": 5.993412494659424,
++   "4": 7.800992488861084
++  },
++  "seconds": 28.8
++ },
++ "ppl|same|tgv_kv|0.5": {
++  "ppl": 3.370039939880371,
++  "per_turn": {
++   "1": 5.1813483238220215,
++   "2": 4.551358222961426,
++   "3": 2.8205506801605225,
++   "4": 2.0676608085632324
++  },
++  "seconds": 29.5
++ },
++ "ppl|same|tgv_kv|0.8": {
++  "ppl": 3.0019924640655518,
++  "per_turn": {
++   "1": 4.328367233276367,
++   "2": 2.434380531311035,
++   "3": 2.7953989505767822,
++   "4": 2.9095513820648193
++  },
++  "seconds": 27.8
++ },
++ "gen|shift|full|0.0": {
++  "exact": 0.9925,
++  "exact_per_turn": {
++   "1": 0.99,
++   "2": 1.0,
++   "3": 1.0,
++   "4": 0.98
++  },
++  "rouge": 0.9987499949999968,
++  "rouge_per_turn": {
++   "1": 0.9983333283333329,
++   "2": 0.9999999949999995,
++   "3": 0.9999999949999995,
++   "4": 0.9966666616666662
++  },
++  "seconds": 24.5
++ },
++ "gen|shift|pyramidkv|0.9": {
++  "exact": 0.29,
++  "exact_per_turn": {
++   "1": 0.52,
++   "2": 0.3,
++   "3": 0.19,
++   "4": 0.15
++  },
++  "rouge": 0.8000265102236674,
++  "rouge_per_turn": {
++   "1": 0.8741060556333703,
++   "2": 0.7990454495713673,
++   "3": 0.7573535304675323,
++   "4": 0.7696010052224057
++  },
++  "seconds": 22.8
++ },
++ "gen|shift|pyramidkv|0.5": {
++  "exact": 0.85,
++  "exact_per_turn": {
++   "1": 0.94,
++   "2": 0.87,
++   "3": 0.8,
++   "4": 0.79
++  },
++  "rouge": 0.969041661666664,
++  "rouge_per_turn": {
++   "1": 0.9874999949999994,
++   "2": 0.9716666616666663,
++   "3": 0.9584999949999997,
++   "4": 0.9584999949999995
++  },
++  "seconds": 24.2
++ },
++ "gen|shift|seedkv|0.9": {
++  "exact": 0.505,
++  "exact_per_turn": {
++   "1": 0.48,
++   "2": 0.53,
++   "3": 0.52,
++   "4": 0.49
++  },
++  "rouge": 0.8161979094763226,
++  "rouge_per_turn": {
++   "1": 0.8473116833399419,
++   "2": 0.8063334997932281,
++   "3": 0.811464641519682,
++   "4": 0.7996818132524451
++  },
++  "seconds": 29.9
++ },
++ "gen|shift|seedkv|0.5": {
++  "exact": 0.86,
++  "exact_per_turn": {
++   "1": 0.9,
++   "2": 0.88,
++   "3": 0.84,
++   "4": 0.82
++  },
++  "rouge": 0.9443333283494559,
++  "rouge_per_turn": {
++   "1": 0.9799999949999995,
++   "2": 0.9463333283473332,
++   "3": 0.9266666616866667,
++   "4": 0.9243333283638334
++  },
++  "seconds": 29.6
++ },
++ "gen|shift|ghostkv|0.9": {
++  "exact": 0.3525,
++  "exact_per_turn": {
++   "1": 0.51,
++   "2": 0.37,
++   "3": 0.28,
++   "4": 0.25
++  },
++  "rouge": 0.7473582896196761,
++  "rouge_per_turn": {
++   "1": 0.829791536845593,
++   "2": 0.7603162899363108,
++   "3": 0.6872272124861528,
++   "4": 0.7120981192106516
++  },
++  "seconds": 31.2
++ },
++ "gen|shift|ghostkv|0.5": {
++  "exact": 0.9575,
++  "exact_per_turn": {
++   "1": 1.0,
++   "2": 0.97,
++   "3": 0.94,
++   "4": 0.92
++  },
++  "rouge": 0.9917499949999973,
++  "rouge_per_turn": {
++   "1": 0.9999999949999995,
++   "2": 0.9939999949999995,
++   "3": 0.9879999949999995,
++   "4": 0.9849999949999995
++  },
++  "seconds": 28.4
++ }
++}
+\ No newline at end of file
+diff --git a/seedkv/make_standin.py b/seedkv/make_standin.py
+index 7de9b37..4576c62 100644
+--- a/seedkv/make_standin.py
++++ b/seedkv/make_standin.py
+@@ -42,6 +42,9 @@ from PIL import Image
+ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ sys.path.insert(0, REPO)
+ 
++import mm_layout  # noqa: E402
++
++IMAGE_POSITION = "first"
+ GRID, CELL = 12, 8
+ SIZE = GRID * CELL
+ N_OBJECTS = 6
+@@ -200,7 +203,9 @@ def encode(turns, tokenizer, lookups=None):
+     conv = conv_templates["llava_v1"].copy()
+     ids, labels = [], []
+     for index, turn in enumerate(turns):
+-        question = turn["question"] + ("\n" + DEFAULT_IMAGE_TOKEN if index == 0 else "")
++        question = turn["question"]
++        if index == 0:                          # the same Turn-1 layout as the evaluators
++            question = mm_layout.first_turn_question(question, 1, IMAGE_POSITION)
+         conv.append_message(conv.roles[0], question)
+         conv.append_message(conv.roles[1], None)
+         base = tokenizer_image_token(conv.get_prompt(), tokenizer, IMAGE_TOKEN_INDEX)
+@@ -451,7 +456,11 @@ def main():
+                         help="weight of the per-patch word loss (training aid, see patch_words)")
+     parser.add_argument("--seed", type=int, default=0)
+     parser.add_argument("--threads", type=int, default=2)
++    parser.add_argument("--image-position", default="first", choices=["first", "last"],
++                        help="Turn-1 layout the stand-in is trained for (must match the evaluators).")
+     args = parser.parse_args()
++    global IMAGE_POSITION
++    IMAGE_POSITION = args.image_position
+     torch.set_num_threads(args.threads)
+ 
+     os.makedirs(args.out, exist_ok=True)
+diff --git a/seedkv/run_efficiency_cpu.py b/seedkv/run_efficiency_cpu.py
+new file mode 100644
+index 0000000..21c92b6
+--- /dev/null
++++ b/seedkv/run_efficiency_cpu.py
+@@ -0,0 +1,47 @@
++"""Run eval_efficiency.py on CPU with a small test model (see make_standin.py).
++
++Test-only shims, as in turncast/run_cpu.py: the model is cast to float32 and
++the caches are sized from the model's real layer count.  The evaluator itself
++is unchanged.  CPU timings of a tiny model say how much WORK a method does
++(tokens through the model); they are not GPU latencies.
++
++    python seedkv/run_efficiency_cpu.py --model-path DIR/llava-v1-standin \
++        --data-path DIR/data/eval_shift.json --image-path DIR/data/images \
++        --device cpu --methods pyramidkv seedkv ghostkv --ratios 0.9 \
++        --context-lengths native 1024 --ghostkv-locators DIR/ghost_locators.pt
++"""
++import os
++import sys
++
++import torch
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++REPO = os.path.dirname(HERE)
++sys.path.insert(0, REPO)
++sys.path.insert(0, os.path.join(REPO, "turncast"))
++
++
++def main(argv=None):
++    torch.set_num_threads(int(os.environ.get("THREADS", 2)))
++    import run_cpu
++    rouge = run_cpu.patched_module("eval_rouge_final2.py")
++    sys.modules["eval_rouge_final2"] = rouge
++
++    from llava.model import builder
++    original = builder.load_pretrained_model
++
++    def load(*args, **kwargs):
++        tokenizer, model, processor, context = original(*args, **kwargs)
++        model = model.float()
++        model.get_vision_tower().to(dtype=torch.float32)
++        model.eval()
++        rouge._TEST_LAYER_NUM = int(model.config.num_hidden_layers)
++        return tokenizer, model, processor, context
++
++    builder.load_pretrained_model = load
++    import eval_efficiency
++    return eval_efficiency.main(argv)
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/seedkv/show_relevance.py b/seedkv/show_relevance.py
+index ab45ebb..b82b2ff 100644
+--- a/seedkv/show_relevance.py
++++ b/seedkv/show_relevance.py
+@@ -71,6 +71,7 @@ def main():
+         if values is None:
+             axis.set_title(title + "\n(no map: no single-token step)", fontsize=8.5, loc="left", color=ink)
+             continue
++        values = values[: values.numel() // (1 + len(item.get("extra_images") or []))]   # the item's own image
+         side = int(round(values.numel() ** 0.5))
+         grid = (values / values.sum().clamp_min(1e-9)).view(side, side).numpy()
+         extent = (0, image.size[0], image.size[1], 0)
+diff --git a/turncast/collect.py b/turncast/collect.py
+index 78f76f3..9e1e29e 100644
+--- a/turncast/collect.py
++++ b/turncast/collect.py
+@@ -85,8 +85,9 @@ def render(item, tokenizer, conv_mode, answers=None):
+     for t, turn in enumerate(item["turns"]):
+         question = turn["question"]
+         answer = answers[t] if answers is not None else turn["answer"]
+-        if t == 0 and DEFAULT_IMAGE_TOKEN not in question:
+-            question = question + "\n" + DEFAULT_IMAGE_TOKEN
++        if t == 0:      # the evaluators' Turn-1 layout (image first); single image only
++            import mm_layout
++            question = mm_layout.first_turn_question(question, 1, "first")
+         conv.append_message(conv.roles[0], question)
+         conv.append_message(conv.roles[1], None)
+         base_prompt = conv.get_prompt()

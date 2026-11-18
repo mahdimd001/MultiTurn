@@ -85,8 +85,9 @@ def render(item, tokenizer, conv_mode, answers=None):
     for t, turn in enumerate(item["turns"]):
         question = turn["question"]
         answer = answers[t] if answers is not None else turn["answer"]
-        if t == 0 and DEFAULT_IMAGE_TOKEN not in question:
-            question = question + "\n" + DEFAULT_IMAGE_TOKEN
+        if t == 0:      # the evaluators' Turn-1 layout (image first); single image only
+            import mm_layout
+            question = mm_layout.first_turn_question(question, 1, "first")
         conv.append_message(conv.roles[0], question)
         conv.append_message(conv.roles[1], None)
         base_prompt = conv.get_prompt()

@@ -42,6 +42,9 @@ from PIL import Image
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
+import mm_layout  # noqa: E402
+
+IMAGE_POSITION = "first"
 GRID, CELL = 12, 8
 SIZE = GRID * CELL
 N_OBJECTS = 6
@@ -200,7 +203,9 @@ def encode(turns, tokenizer, lookups=None):
     conv = conv_templates["llava_v1"].copy()
     ids, labels = [], []
     for index, turn in enumerate(turns):
-        question = turn["question"] + ("\n" + DEFAULT_IMAGE_TOKEN if index == 0 else "")
+        question = turn["question"]
+        if index == 0:                          # the same Turn-1 layout as the evaluators
+            question = mm_layout.first_turn_question(question, 1, IMAGE_POSITION)
         conv.append_message(conv.roles[0], question)
         conv.append_message(conv.roles[1], None)
         base = tokenizer_image_token(conv.get_prompt(), tokenizer, IMAGE_TOKEN_INDEX)
@@ -451,7 +456,11 @@ def main():
                         help="weight of the per-patch word loss (training aid, see patch_words)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--image-position", default="first", choices=["first", "last"],
+                        help="Turn-1 layout the stand-in is trained for (must match the evaluators).")
     args = parser.parse_args()
+    global IMAGE_POSITION
+    IMAGE_POSITION = args.image_position
     torch.set_num_threads(args.threads)
 
     os.makedirs(args.out, exist_ok=True)
