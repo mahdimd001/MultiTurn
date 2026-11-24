@@ -3,17 +3,16 @@
     "eval_efficiency.py",
     "--methods",
     "full",
-    "tgv_kv",
-    "pyramidkv",
-    "seedkv",
     "ghostkv",
+    "pyramidkv",
     "--ratios",
     "0.9",
     "--context-lengths",
     "native",
     "4096",
+    "8192",
     "--gen-tokens",
-    "512",
+    "256",
     "--num-turns",
     "3"
   ],
@@ -29,19 +28,18 @@
     "image_aspect_ratio": "pad",
     "methods": [
       "full",
-      "tgv_kv",
-      "pyramidkv",
-      "seedkv",
-      "ghostkv"
+      "ghostkv",
+      "pyramidkv"
     ],
     "ratios": [
       0.9
     ],
     "context_lengths": [
       "native",
-      4096
+      4096,
+      8192
     ],
-    "gen_tokens": 512,
+    "gen_tokens": 256,
     "stop_at_eos": false,
     "num_turns": 3,
     "num_samples": 1,
@@ -50,12 +48,7 @@
     "turncast_scorer": "/lustre/hdd/LAS/jannesar-lab/msamani/modality_aware_KVCache/turncast_data/turncast_scorer.pt",
     "turncast_boundary": "window",
     "ghostkv_locators": "./locators_llava15_7b.pt",
-    "ghostkv_context": "prefix+resident",
-    "ghostkv_fault_on": "answer",
-    "ghostkv_victims": "image",
     "ghostkv_max_faults": 0,
-    "ghostkv_n_locators": 4,
-    "ghostkv_threshold": "auto",
     "long_context_dir": null,
     "long_context_mode": "images",
     "image_position": "first",
@@ -86,7 +79,8 @@
   "image_tokens": 576,
   "data_files": {
     "native": "./ConvBench/convbench.json",
-    "4096": "./ConvBench/long_context/convbench_img4096.json"
+    "4096": "./ConvBench/long_context/convbench_img4096.json",
+    "8192": "./ConvBench/long_context/convbench_img8192.json"
   },
   "device": "cuda:0",
   "device_name": "NVIDIA A100 80GB PCIe",
@@ -94,5 +88,5 @@
   "transformers": "4.31.0",
   "python": "3.10.10",
   "host": "nova22-gpu-5",
-  "started": "2026-11-13 18:46:05"
+  "started": "2026-11-18 12:14:15"
 }

@@ -12,7 +12,7 @@ The map of a turn is the attention the locator heads WOULD pay to every image
 patch if the whole image were cached (kv_cache_ghostkv.py), summed over the
 answer tokens.  Circles mark the patches that were regenerated in that turn.
 
---which   relevance_answer (default) | peak | relevance
+--which   relevance_answer (default) | peak
 --aspect  pad (LLaVA-1.5: the image is padded to a square) | resize
 Needs matplotlib and Pillow.
 """
@@ -39,7 +39,7 @@ def main():
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--image-path", required=True)
     parser.add_argument("--conversation", type=int, default=0, help="index in the run (= in the data file)")
-    parser.add_argument("--which", default="relevance_answer", choices=["relevance_answer", "peak", "relevance"])
+    parser.add_argument("--which", default="relevance_answer", choices=["relevance_answer", "peak"])
     parser.add_argument("--aspect", default="pad", choices=["pad", "resize"])
     parser.add_argument("--out", required=True)
     args = parser.parse_args()

@@ -30,3 +30,5 @@ ecache/
 .DS_Store
 venv_qwen/
 path/to/dir/
+
+metacompress_data/

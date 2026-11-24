@@ -15,7 +15,7 @@ eval_rouge_final2.py with the CPU shims of turncast/run_cpu.py).
                     in holds exactly the original key of its position.
  4. Paging works    the token that faults reads the paged-in patches in the same
                     forward pass (real attention on them at the faulting layer).
- 5. No-op at ratio 0, and no faults when the threshold cannot be reached.
+ 5. No-op at ratio 0, and no regeneration with paging off.
  6. Cost            same evaluator forwards as PyramidKV; faults and regenerated
                     tokens per turn (SeedKV regenerates the whole prefill).
  7. Calibration     runs with the full cache, does not change the model's output,
@@ -127,8 +127,8 @@ def test_structure(args, ratio):
             groups = row.shape[0] // pos.shape[0]
             wanted = torch.as_tensor(fault["patches"]) + cache.image_start
             best = 0.0
-            for head in cache._loc_by_layer[layer]:
-                cols = torch.isin(pos[head // groups], wanted).nonzero().flatten()
+            for head in cache._ghost[layer]["heads"].tolist():
+                cols = torch.isin(pos[head], wanted).nonzero().flatten()
                 best = max(best, float(row[head, 0, cols].sum()))
             read_now.append((best, fault["predicted"]))
 
@@ -142,7 +142,6 @@ def test_structure(args, ratio):
     full = stash[id(cache)]
     patches = list(range(cache.image_len))
     image = slice(cache.image_start, cache.image_end)
-    cache.use_prefix, saved = True, cache.use_prefix
     fresh = cache._regenerate_patches(patches, None)
     worst = max(max_diff((k, v), (fk[:, :, image], fv[:, :, image])) for (k, v), (fk, fv) in zip(fresh, full))
     check(f"ratio {ratio}: all patches regenerated after the text prefix equal the original image KV",
@@ -159,7 +158,6 @@ def test_structure(args, ratio):
     worst = max(max_diff((k, v), (fk[:, :, index], fv[:, :, index])) for (k, v), (fk, fv) in zip(fresh, full))
     check(f"ratio {ratio}: a subset regenerated with the other patches as context equals the original",
           worst < 1e-4, f"{len(subset)} of {len(patches)} patches, max |diff| = {worst:.2e}")
-    cache.use_prefix = saved
 
     # 2. budget, at every call
     layers = cache.layer_num
@@ -174,7 +172,7 @@ def test_structure(args, ratio):
           f"largest growth per layer in one step: {max(grow)} entry (the new token)")
     print(f"       overhead: seed {cache.seed_bytes} bytes + ghost keys {cache.ghost_bytes} bytes of "
           f"{len(cache.locators)} head(s) = {cache.charge} KV entries = {cache.charge / layers:.2f} per layer; "
-          f"{cache.page_slots} protected paged patches")
+          f"up to {cache.page_slots} patches per fault")
 
     # 3. layout
     check(f"ratio {ratio}: per-head layout", not problems,
@@ -199,7 +197,7 @@ def test_structure(args, ratio):
     check(f"ratio {ratio}: evaluator forwards equal PyramidKV's", ghost.forwards == pyramid.forwards,
           f"{ghost.forwards} vs {pyramid.forwards}")
     tokens = sum(c.regen_tokens for c in ghost.caches)
-    patches_regenerated = sum(c.regen_patches for c in ghost.caches)
+    patches_regenerated = sum(len(f["patches"]) for c in ghost.caches for f in c.fault_log)
     print(f"       cost per turn: {faults / turns:.2f} faults, {tokens / turns:.1f} tokens through the model "
           f"({patches_regenerated / turns:.1f} of them image patches); "
           f"SeedKV: {cache.n0} tokens per later turn")
@@ -208,7 +206,7 @@ def test_structure(args, ratio):
     with open(harness.standin_paths(args.standin, args.split)["data"]) as handle:
         items = json.load(handle)[: args.samples]
     side = int(round(cache.image_len ** 0.5))
-    hits = {"relevance": [], "relevance_answer": [], "peak": []}
+    hits = {"relevance_answer": [], "peak": []}
     for item_cache, item in zip(ghost.caches, items):
         for turn, entry in zip(item["turns"], item_cache.turn_log):
             if "target" not in turn:
@@ -222,7 +220,7 @@ def test_structure(args, ratio):
         mean = {name: sum(values) / max(1, len(values)) for name, values in hits.items()}
         check(f"ratio {ratio}: the relevance map points at the asked object", mean["peak"] > 0.6,
               f"top-4 patches inside the object: sharpest answer token {mean['peak']:.2f}, "
-              f"all answer tokens {mean['relevance_answer']:.2f}, whole turn {mean['relevance']:.2f}; "
+              f"all checked answer tokens {mean['relevance_answer']:.2f}; "
               f"chance {4.0 / cache.image_len:.2f}; {len(hits['peak'])} turns")
 
 
@@ -234,16 +232,12 @@ def test_noop(args):
     return full["overall_ppl"]
 
 
-def test_no_faults(args, ratio):
-    with Recorder("eval_ppl_final.py") as quiet:
-        run("eval_ppl_final.py", ppl_argv(args, "ghostkv", ratio, "g_quiet",
-                                          ghost_extra(args, ["--ghostkv-threshold", "2.0"])))
-    faults = sum(c.faults for c in quiet.caches)
-    tokens = sum(c.regen_tokens for c in quiet.caches)
-    check(f"ratio {ratio}: no fault and no regeneration when the threshold cannot be reached",
-          faults == 0 and tokens == 0, f"{faults} faults, {tokens} tokens")
-    run("eval_ppl_final.py", ppl_argv(args, "ghostkv", ratio, "g_off", ["--ghostkv-no-paging"]))
-    return load_ppl(args, "g_quiet"), load_ppl(args, "g_off")
+def test_paging_off(args, ratio):
+    with Recorder("eval_ppl_final.py") as off:
+        run("eval_ppl_final.py", ppl_argv(args, "ghostkv", ratio, "g_off", ["--ghostkv-no-paging"]))
+    faults = sum(c.faults for c in off.caches)
+    check(f"ratio {ratio}: no regeneration with --ghostkv-no-paging", faults == 0, f"{faults} faults")
+    return load_ppl(args, "g_off")
 
 
 def test_calibration(args, full_ppl):
@@ -286,14 +280,14 @@ def main():
         test_structure(args, ratio)
 
     ratio = args.ratios[0]
-    quiet, off = test_no_faults(args, ratio)
+    off = test_paging_off(args, ratio)
     first = run_ppl(args.standin, args.split, "ghostkv", ratio, args.samples, args.work, "g_a", ghost_extra(args))
     second = run_ppl(args.standin, args.split, "ghostkv", ratio, args.samples, args.work, "g_b", ghost_extra(args))
     check(f"ratio {ratio}: deterministic", first["overall_ppl"] == second["overall_ppl"],
           f"{first['overall_ppl']:.6f}")
     pyramid = load_ppl(args, f"g_pyr_{ratio}")
     print(f"       perplexity at ratio {ratio} ({args.samples} conversations): full {full_ppl:.3f}, "
-          f"GhostKV {first['overall_ppl']:.3f}, GhostKV without faults {quiet:.3f}, "
+          f"GhostKV {first['overall_ppl']:.3f}, "
           f"paging off (no seed, no ghost keys) {off:.3f}, PyramidKV {pyramid:.3f}")
 
     out = run_rouge(args.standin, args.split, "ghostkv", ratio, args.samples, args.work, "g_gen",
@@ -301,11 +295,6 @@ def main():
     accuracy, _ = harness.exact_match(out)
     check(f"ratio {ratio}: eval_rouge_final2.py runs", len(out["results"]) == args.samples,
           f"exact answers {accuracy:.2f}, ROUGE-L {out['avg_rouge_l_f']:.3f}")
-    for context in ("prefix", "resident", "none"):
-        result = run_ppl(args.standin, args.split, "ghostkv", ratio, args.samples, args.work, f"g_{context}",
-                         ghost_extra(args, ["--ghostkv-context", context]))
-        check(f"ratio {ratio}: context={context} runs", result["overall_ppl"] > 0, f"ppl {result['overall_ppl']:.3f}")
-
     print()
     print("ALL PASSED" if not FAILED else f"{len(FAILED)} FAILED: {FAILED}")
     return 1 if FAILED else 0

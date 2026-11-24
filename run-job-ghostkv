@@ -34,7 +34,7 @@ MAXTOK=${MAXTOK:-512}
 # (question before the image) is not valid any more, hence the new name.
 LOCATORS=${LOCATORS:-$ROOT/ghostkv_data/locators_llava15_7b_imagefirst.pt}
 CALIB_SAMPLES=${CALIB_SAMPLES:-20}
-# Extra flags for GhostKV only, e.g. "--ghostkv-fault-on answer" (fewer faults),
+# Extra flags for GhostKV only, e.g. "--ghostkv-max-faults 1" (fewer regenerations),
 # "--seedkv-allocation pyramidkv" (same entries per layer as PyramidKVCache) or
 # "--ghostkv-no-paging" (the ablation).
 GHOSTKV_ARGS=${GHOSTKV_ARGS:-}

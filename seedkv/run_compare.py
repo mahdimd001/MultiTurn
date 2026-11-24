@@ -50,19 +50,8 @@ METHODS = {
     # GhostKV needs --locators (a calibration file for this model).
     "ghostkv": ("ghostkv", []),
     "ghostkv_no_paging": ("ghostkv", ["--ghostkv-no-paging"]),
-    # Same entries per layer as this repo's PyramidKVCache (which holds more than L * C).
-    "ghostkv_as_pyramidkv": ("ghostkv", ["--seedkv-allocation", "pyramidkv"]),
-    "ghostkv_no_paging_as_pyramidkv": ("ghostkv", ["--ghostkv-no-paging", "--seedkv-allocation", "pyramidkv"]),
-    "ghostkv_nocharge": ("ghostkv", ["--seedkv-no-seed-charge"]),
-    "ghostkv_answer_only": ("ghostkv", ["--ghostkv-fault-on", "answer"]),
-    "ghostkv_auto_heads": ("ghostkv", ["--ghostkv-locators", "none"]),
-    "ghostkv_ctx_prefix": ("ghostkv", ["--ghostkv-context", "prefix"]),
-    "ghostkv_ctx_resident": ("ghostkv", ["--ghostkv-context", "resident"]),
-    "ghostkv_ctx_none": ("ghostkv", ["--ghostkv-context", "none"]),
-    "ghostkv_t15": ("ghostkv", ["--ghostkv-threshold", "0.15"]),
-    "ghostkv_t70": ("ghostkv", ["--ghostkv-threshold", "0.7"]),
-    "ghostkv_2heads": ("ghostkv", ["--ghostkv-n-locators", "2", "--ghostkv-ghost-share", "1"]),
-    "ghostkv_4heads": ("ghostkv", ["--ghostkv-n-locators", "4", "--ghostkv-ghost-share", "1"]),
+    "ghostkv_no_limit": ("ghostkv", ["--ghostkv-max-faults", "0"]),
+    "ghostkv_1fault": ("ghostkv", ["--ghostkv-max-faults", "1"]),
     # Ablation: SeedKV's code, scoring and exact budgets with regeneration off.
     "seedkv_retain_only": ("seedkv", ["--seedkv-no-regenerate"]),
 }

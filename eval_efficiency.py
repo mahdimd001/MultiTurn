@@ -232,14 +232,7 @@ def build_parser():
     # GhostKV (kv_cache_ghostkv.py): the locator heads found by --ghostkv-calibrate.
     sweep.add_argument("--ghostkv-locators", type=str, default="./locators_llava15_7b.pt",
                         help="GhostKV: calibration file with the locator heads of this model.")
-    sweep.add_argument("--ghostkv-context", default="prefix+resident",
-                        choices=["prefix+resident", "prefix", "resident", "none"])
-    sweep.add_argument("--ghostkv-fault-on", default="answer", choices=["all", "answer"])
-    sweep.add_argument("--ghostkv-victims", default="image", choices=["image", "any"])
-    sweep.add_argument("--ghostkv-max-faults", type=int, default=2)
-    sweep.add_argument("--ghostkv-detect-tokens", type=int, default=32)
-    sweep.add_argument("--ghostkv-n-locators", type=int, default=4)
-    sweep.add_argument("--ghostkv-threshold", default="auto")
+    sweep.add_argument("--ghostkv-max-faults", type=int, default=0)
 
     longctx = parser.add_argument_group("long-context samples (make_long_context.py)")
     longctx.add_argument(
@@ -918,13 +911,7 @@ class Benchmark:
             turncast_scorer=getattr(args, "turncast_scorer", None),
             turncast_boundary=getattr(args, "turncast_boundary", "window"),
             ghostkv_locators=getattr(args, "ghostkv_locators", "./locators_llava15_7b.pt"),
-            ghostkv_context=getattr(args, "ghostkv_context", "prefix+resident"),
-            ghostkv_fault_on=getattr(args, "ghostkv_fault_on", "answer"),
-            ghostkv_victims=getattr(args, "ghostkv_victims", "image"),
             ghostkv_max_faults=getattr(args, "ghostkv_max_faults", 2),
-            ghostkv_detect_tokens=getattr(args, "ghostkv_detect_tokens", 32),
-            ghostkv_n_locators=getattr(args, "ghostkv_n_locators", 4),
-            ghostkv_threshold=getattr(args, "ghostkv_threshold", "auto"),
 
 
         )

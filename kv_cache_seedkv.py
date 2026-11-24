@@ -156,7 +156,7 @@ class SeedKVCache:
         window_size=8,
         kernel_size=7,
         pooling="maxpool",
-        allocation="pyramid",
+        allocation="pyramidkv",
         beta=20.0,
         seed="auto",
         charge_seed=True,
